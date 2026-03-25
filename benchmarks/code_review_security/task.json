@@ -1,0 +1,19 @@
+{
+  "id": "code_review_security",
+  "type": "code_review",
+  "prompt": "Review the following Flask API endpoint code (`api.py`) for security vulnerabilities. There are exactly 5 security issues seeded in this code.\n\nFor each vulnerability found, report:\n1. Line number or code snippet\n2. Vulnerability type (e.g., SQL injection, XSS, etc.)\n3. Severity (CRITICAL / HIGH / MEDIUM / LOW)\n4. Recommended fix\n\nFormat your response as a JSON array of findings.",
+  "expected_files": [],
+  "scoring": {
+    "issues_found": 0.6,
+    "correct_classification": 0.2,
+    "false_positive_penalty": 0.1,
+    "fix_quality": 0.1
+  },
+  "seeded_issues": [
+    {"id": "sql_injection", "type": "SQL Injection", "severity": "CRITICAL", "line_hint": "cursor.execute(f\"SELECT"},
+    {"id": "hardcoded_secret", "type": "Hardcoded Secret", "severity": "CRITICAL", "line_hint": "SECRET_KEY = \"supersecret"},
+    {"id": "xss", "type": "Cross-Site Scripting", "severity": "HIGH", "line_hint": "f\"<h1>Welcome {name}</h1>\""},
+    {"id": "path_traversal", "type": "Path Traversal", "severity": "HIGH", "line_hint": "open(f\"/data/{filename}\")"},
+    {"id": "no_rate_limit", "type": "Missing Rate Limiting", "severity": "MEDIUM", "line_hint": "@app.route(\"/api/login\")"}
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "id": "code_gen_lru",
+  "type": "code_generation",
+  "prompt": "Implement an LRU (Least Recently Used) cache in Python. Requirements:\n\n1. Class `LRUCache` with `capacity` parameter\n2. `get(key)` — return value if exists, -1 if not. Mark as recently used.\n3. `put(key, value)` — insert or update. If at capacity, evict least recently used.\n4. O(1) time complexity for both operations\n5. Include comprehensive tests using pytest\n6. Follow immutable patterns where possible\n7. Include type hints\n\nCreate two files:\n- `lru_cache.py` — the implementation\n- `test_lru_cache.py` — the tests (minimum 8 test cases)",
+  "expected_files": ["lru_cache.py", "test_lru_cache.py"],
+  "scoring": {
+    "tests_pass": 0.4,
+    "test_count_minimum": 8,
+    "test_count_score": 0.15,
+    "has_type_hints": 0.1,
+    "o1_complexity": 0.15,
+    "code_quality": 0.2
+  },
+  "evaluation_command": "cd {work_dir} && python -m pytest test_lru_cache.py -v --tb=short 2>&1"
+}

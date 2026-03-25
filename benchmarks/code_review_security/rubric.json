@@ -1,0 +1,32 @@
+{
+  "total_seeded_issues": 5,
+  "scoring": {
+    "per_issue_found": 0.12,
+    "per_correct_classification": 0.04,
+    "per_good_fix": 0.04,
+    "false_positive_penalty": -0.05,
+    "max_score": 1.0
+  },
+  "issues": {
+    "sql_injection": {
+      "keywords": ["sql injection", "sql", "injection", "parameterized", "prepared statement"],
+      "severity": "CRITICAL"
+    },
+    "hardcoded_secret": {
+      "keywords": ["hardcoded", "secret", "key", "credential", "password in code"],
+      "severity": "CRITICAL"
+    },
+    "xss": {
+      "keywords": ["xss", "cross-site scripting", "cross site scripting", "unsanitized", "html injection"],
+      "severity": "HIGH"
+    },
+    "path_traversal": {
+      "keywords": ["path traversal", "directory traversal", "..\/", "lfi", "local file inclusion"],
+      "severity": "HIGH"
+    },
+    "no_rate_limit": {
+      "keywords": ["rate limit", "brute force", "throttle", "dos", "denial of service"],
+      "severity": "MEDIUM"
+    }
+  }
+}

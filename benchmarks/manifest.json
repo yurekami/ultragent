@@ -1,0 +1,33 @@
+{
+  "version": "1.0.0",
+  "description": "HyperAgents benchmark suite for Claude Code agent evaluation",
+  "tasks": [
+    {
+      "id": "code_gen_lru",
+      "type": "code_generation",
+      "description": "Implement an LRU cache with get/put operations and full test coverage",
+      "difficulty": "medium",
+      "timeout_seconds": 120,
+      "max_score": 1.0,
+      "staged_eval": true
+    },
+    {
+      "id": "bug_fix_pagination",
+      "type": "bug_fix",
+      "description": "Fix an off-by-one error in a pagination utility with a failing test",
+      "difficulty": "easy",
+      "timeout_seconds": 90,
+      "max_score": 1.0,
+      "staged_eval": true
+    },
+    {
+      "id": "code_review_security",
+      "type": "code_review",
+      "description": "Review a Flask endpoint for 5 seeded security vulnerabilities",
+      "difficulty": "medium",
+      "timeout_seconds": 90,
+      "max_score": 1.0,
+      "staged_eval": false
+    }
+  ]
+}

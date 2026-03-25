@@ -1,0 +1,12 @@
+{
+  "id": "bug_fix_pagination",
+  "type": "bug_fix",
+  "prompt": "There is a bug in `paginator.py`. The `paginate()` function has an off-by-one error that causes the last page to be missing one item. The test in `test_paginator.py` is failing.\n\nFix the bug in `paginator.py` so all tests pass. Do NOT modify the tests.\n\nImportant:\n- Make the minimal change needed\n- Do not refactor or restructure the code\n- The fix should be a single line change",
+  "expected_files": ["paginator.py"],
+  "scoring": {
+    "tests_pass": 0.5,
+    "minimal_diff": 0.3,
+    "no_test_modification": 0.2
+  },
+  "evaluation_command": "cd {work_dir} && python -m pytest test_paginator.py -v --tb=short 2>&1"
+}

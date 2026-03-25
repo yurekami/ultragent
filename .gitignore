@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.key
+*.pem
+
+# Runtime data (generated during use, not shipped)
+archive.jsonl
+metadata.json
+results.tsv
+trajectories.jsonl
+evolve_queue.jsonl
+generations/
+frontier/
+backups/
+snapshots/
+.failure_tracker
+.last_agent
+.omc/

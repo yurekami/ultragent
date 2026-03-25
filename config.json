@@ -1,0 +1,42 @@
+{
+  "max_generations": 50,
+  "parent_selection_strategy": "score_child_prop",
+  "meta_agent_model": "opus",
+  "eval_agent_model": "sonnet",
+  "meta_agent_max_tool_calls": 40,
+  "auto_promote_threshold": null,
+  "time_budget_seconds": 300,
+  "focused_mutation": true,
+  "single_score_mode": true,
+  "scoring_weights": {
+    "structural": 0.20,
+    "llm_judge": 0.50,
+    "task_based": 0.30
+  },
+  "llm_judge_weights": {
+    "clarity": 0.20,
+    "specificity": 0.15,
+    "actionability": 0.15,
+    "consistency": 0.20,
+    "coverage": 0.15,
+    "conciseness": 0.05,
+    "improvement": 0.10
+  },
+  "genome_include": [
+    "agents/*.md",
+    "rules/*.md",
+    "skills/omc-learned/*/SKILL.md",
+    "CLAUDE.md"
+  ],
+  "genome_exclude": [
+    "settings.json",
+    "settings.local.json",
+    "credentials*",
+    "*.key",
+    "*.pem",
+    "projects/",
+    "ultragent/",
+    "memory/",
+    "statsig/"
+  ]
+}
