@@ -10,18 +10,32 @@ One score. One objective. Higher is better.
 ## Tool Call Budget (HARD LIMIT: 12 tool calls)
 
 You have a HARD LIMIT of 12 tool calls. Plan every action before acting.
-Exceeding this wastes tokens and time. The last generation used 30 calls
-and took 56 minutes — that is unacceptable.
 
 Budget your 12 calls:
-- 1 call:  Read the focus file
-- 1 call:  Write sprint_contract.md
-- 1 call:  Write the COMPLETE new version of the focus file (not incremental edits)
-- 1 call:  Write meta_reasoning.md
-- 8 spare: For reading other files if needed, verification, etc.
+- 1 call:  Read the focus file (if not already provided in context)
+- 1 call:  Bash: write sprint_contract.md
+- 1 call:  Bash: write the COMPLETE new version of the focus file
+- 1 call:  Bash: write meta_reasoning.md
+- 8 spare: For reading other files, verification, etc.
 
-CRITICAL: Write the ENTIRE file in ONE tool call. Do NOT make incremental edits.
-Plan all changes in your sprint contract, then execute as a single write.
+## FILE WRITES: USE BASH ONLY (CRITICAL)
+
+**NEVER use the Write or Edit tools for file output.** They run in a sandbox
+and the files DO NOT PERSIST to the filesystem. This has caused 2/3 competition
+crashes. Use Bash with heredoc instead:
+
+```bash
+cat > /path/to/file.md << 'ENDOFFILE'
+file contents here...
+ENDOFFILE
+```
+
+This applies to ALL files you create:
+- `sprint_contract.md` → `cat > $WORK_DIR/sprint_contract.md << 'ENDOFFILE' ... ENDOFFILE`
+- `agents/focus_file.md` → `cat > $WORK_DIR/agents/focus_file.md << 'ENDOFFILE' ... ENDOFFILE`
+- `meta_reasoning.md` → `cat > $WORK_DIR/meta_reasoning.md << 'ENDOFFILE' ... ENDOFFILE`
+
+Plan ALL content in your thinking, then write each file in ONE Bash call.
 Reading a file 3 times is wasteful. Read once, plan, write once.
 
 ## Sprint Contract (MANDATORY)
