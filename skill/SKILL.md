@@ -117,6 +117,30 @@ Use `mode: "bypassPermissions"` — it's working on copies.
 **IMPORTANT**: If focused_mutation is enabled, only send the focus file contents
 to reduce context and cost. The MetaAgent should only modify that one file.
 
+### Step 4b: Validate Output + Debug Retry (AI Scientist Pattern)
+
+After MetaAgent completes, validate:
+
+```bash
+# Check file persisted and changed
+wc -l $WORK_DIR/agents/<focus_file>
+diff ~/.claude/ultragent/generations/<parent_id>/snapshot/agents/<focus_file> $WORK_DIR/agents/<focus_file> | head -5
+```
+
+If the file is UNCHANGED (no diff) or MISSING:
+- This is a crash (sandbox write issue or MetaAgent produced nothing)
+- **DEBUG RETRY**: Spawn a SMALL retry agent (sonnet, not opus — cheaper):
+  ```
+  "Your previous attempt to modify {focus_file} failed — the file is unchanged.
+   The file content is: {full file content from parent snapshot}
+   Apply these changes from the sprint contract: {contract summary}
+   Write the COMPLETE file using: cat > {path} << 'ENDOFFILE' ... ENDOFFILE
+   You have 3 tool calls max."
+  ```
+- If retry succeeds (file now different) → continue to Step 5
+- If retry also fails → DISCARD with reason "crashed after debug retry"
+- **Max 1 retry per candidate** (AI Scientist uses 3, but diminishing returns for markdown)
+
 ### Step 5: Capture Diff & Create Generation
 
 After MetaAgent completes:
@@ -155,12 +179,25 @@ cp $WORK_DIR/meta_reasoning.md ~/.claude/ultragent/generations/$NEXT_GEN/ 2>/dev
 PYTHONIOENCODING=utf-8 python ~/.claude/ultragent/evaluate.py structural $NEXT_GEN
 ```
 
-**LLM-Judge eval (spawn Sonnet evaluator):**
+**Ensemble Pairwise Evaluation (AI Scientist + Scientific Taste):**
 ```bash
 PYTHONIOENCODING=utf-8 python ~/.claude/ultragent/evaluate.py prepare-judge $NEXT_GEN
 ```
-Spawn a `code-reviewer` agent (model: sonnet) with the judge context.
-Parse its JSON response for scores.
+
+Spawn **3 independent judge agents IN PARALLEL** (single message, 3 Agent calls).
+Each is a `code-reviewer` (model: sonnet) with the same judge context.
+Each must READ BOTH files (parent + child snapshot of the focus file).
+Each returns JSON: `{preferred, confidence, score_delta, key_reason, ...}`
+
+**Aggregate via majority vote:**
+```python
+from evaluate import ensemble_aggregate, compute_pairwise_aggregate
+ensemble = ensemble_aggregate([judge_a, judge_b, judge_c])
+# ensemble.votes = {"child": 2, "parent": 1} → child wins
+aggregate = compute_pairwise_aggregate(structural_score, ensemble, parent_aggregate)
+```
+
+Unanimous (3-0) = high confidence. Split (2-1) = medium, log dissent.
 
 Write scores to `generations/$NEXT_GEN/scores.json` then:
 ```bash

@@ -362,6 +362,75 @@ def compute_pairwise_aggregate(
     return round(max(0, min(1, final)), 4)
 
 
+# ─── Ensemble Evaluation (AI Scientist pattern) ─────────────────────────────
+
+def ensemble_aggregate(judge_results: list[dict]) -> dict:
+    """
+    Aggregate multiple independent pairwise judge results via majority vote.
+    Inspired by AI Scientist's ensemble of 5 reviewers (we use 3).
+
+    Args:
+        judge_results: List of pairwise judge outputs, each with:
+            preferred, confidence, score_delta, key_reason
+
+    Returns:
+        Aggregated result with majority preference, mean delta, and individual votes.
+    """
+    if not judge_results:
+        return {"preferred": "parent", "confidence": "low", "score_delta": 0,
+                "key_reason": "no judges", "ensemble_size": 0}
+
+    # Count votes
+    child_votes = sum(1 for j in judge_results if j.get("preferred") == "child")
+    parent_votes = len(judge_results) - child_votes
+    majority = "child" if child_votes > parent_votes else "parent"
+
+    # Aggregate deltas (normalize: parent-preferred deltas should be negative)
+    deltas = []
+    for j in judge_results:
+        d = j.get("score_delta", 0)
+        if j.get("preferred") == "parent" and d > 0:
+            d = -abs(d)
+        elif j.get("preferred") == "child" and d < 0:
+            d = abs(d)
+        deltas.append(d)
+
+    mean_delta = sum(deltas) / len(deltas) if deltas else 0
+
+    # Aggregate confidence: unanimous = high, majority = medium, split = low
+    if child_votes == len(judge_results) or parent_votes == len(judge_results):
+        agg_confidence = "high"
+    elif abs(child_votes - parent_votes) >= 2:
+        agg_confidence = "medium"
+    else:
+        agg_confidence = "medium"  # 2-1 split is still medium
+
+    # Collect reasons
+    reasons = [j.get("key_reason", "") for j in judge_results if j.get("key_reason")]
+    majority_reasons = [r for j, r in zip(judge_results, reasons)
+                        if j.get("preferred") == majority]
+
+    # Check agreement on regressions
+    all_regressions = []
+    for j in judge_results:
+        all_regressions.extend(j.get("regressions", []))
+
+    return {
+        "preferred": majority,
+        "confidence": agg_confidence,
+        "score_delta": round(mean_delta, 4),
+        "key_reason": majority_reasons[0] if majority_reasons else (reasons[0] if reasons else ""),
+        "ensemble_size": len(judge_results),
+        "votes": {"child": child_votes, "parent": parent_votes},
+        "individual_deltas": deltas,
+        "unanimous": child_votes == len(judge_results) or parent_votes == len(judge_results),
+        "regressions": list(set(all_regressions)),
+        "suggestions": list(set(
+            s for j in judge_results for s in j.get("suggestions", [])
+        ))[:5],
+    }
+
+
 # ─── Benchmark System ────────────────────────────────────────────────────────
 
 def list_benchmarks() -> list[dict]:
