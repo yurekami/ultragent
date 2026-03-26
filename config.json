@@ -28,6 +28,24 @@
     "skills/omc-learned/*/SKILL.md",
     "CLAUDE.md"
   ],
+  "competition": {
+    "enabled": true,
+    "size": 3,
+    "strategies": [
+      {
+        "name": "simplifier",
+        "directive": "Your strategy is SIMPLIFICATION. Remove lines while preserving all information. Compression is your goal. A shorter file with identical behavioral coverage is the ideal outcome. Do NOT add content."
+      },
+      {
+        "name": "exemplifier",
+        "directive": "Your strategy is EXEMPLIFICATION. Add concrete before/after code examples that demonstrate the boundary between correct and incorrect agent behavior. Specificity is your goal. Every example must show a REAL scenario."
+      },
+      {
+        "name": "aligner",
+        "directive": "Your strategy is ALIGNMENT. Connect this file to the user's CLAUDE.md philosophy (verification-first, immutability, anti-genie rules). Add concrete checks, decision trees, or failure modes that reference these principles. Consistency is your goal."
+      }
+    ]
+  },
   "genome_exclude": [
     "settings.json",
     "settings.local.json",

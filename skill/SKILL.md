@@ -85,16 +85,40 @@ PYTHONIOENCODING=utf-8 python ~/.claude/ultragent/ua.py suggest-focus
 
 If the queue overrode the focus file, skip suggest-focus and use the queued target.
 
-### Step 3: Prepare Workspace
+### Step 3: Prepare Workspace(s)
 
+Check competition mode:
 ```bash
-WORK_DIR=$(mktemp -d)
-cp -r ~/.claude/ultragent/generations/<parent_id>/snapshot/* "$WORK_DIR/"
+PYTHONIOENCODING=utf-8 python ~/.claude/ultragent/ua.py competition
 ```
 
-### Step 4: Run MetaAgent (Time-Boxed, 5 Minutes)
+**If competition enabled (default: 3 agents)**:
+Create one workspace per competitor:
+```bash
+WORK_A=$(mktemp -d)  # simplifier
+WORK_B=$(mktemp -d)  # exemplifier
+WORK_C=$(mktemp -d)  # aligner
+for d in $WORK_A $WORK_B $WORK_C; do
+  cp -r ~/.claude/ultragent/generations/<parent_id>/snapshot/* "$d/"
+done
+```
 
-Spawn an **Opus agent** (`subagent_type: executor`, `model: opus`) with:
+**If competition disabled**: single workspace as before.
+
+### Step 3b: Load Proven Skills
+
+```bash
+PYTHONIOENCODING=utf-8 python ~/.claude/ultragent/ua.py skills
+```
+
+Include the skills list in the MetaAgent context as "Proven Skills."
+
+### Step 4: Run MetaAgents (Competition Mode)
+
+Spawn **ALL competitors IN PARALLEL** using multiple Agent tool calls in a single message.
+Each gets the same base context but a DIFFERENT strategy directive.
+
+For EACH competitor, spawn an **Opus agent** (`subagent_type: executor`, `model: opus`) with:
 
 ```
 <system>
@@ -102,6 +126,14 @@ Spawn an **Opus agent** (`subagent_type: executor`, `model: opus`) with:
 </system>
 
 <context>
+## Your Strategy
+{strategy directive for THIS competitor — e.g., simplifier/exemplifier/aligner}
+You are competing against other agents. Execute YOUR strategy well.
+
+## Proven Skills (from evolution history)
+{output of ua.py skills — patterns that worked in prior generations}
+Use these if they apply to your current file.
+
 ## Research Directives
 {contents of program.md}
 
@@ -164,7 +196,22 @@ If the contract is obviously weak (vague, unrealistic, or proposes no real chang
 you MAY skip to discard without running the full evaluation. This saves cost.
 Log as `discard` with reason "weak sprint contract".
 
-### Step 5: Capture Diff & Create Generation
+### Step 4c: Competition — Repeat Step 4 for Each Competitor
+
+In competition mode, Steps 4-4b run for EACH competitor:
+- Competitor A (simplifier) → WORK_A → sprint_contract_A
+- Competitor B (exemplifier) → WORK_B → sprint_contract_B
+- Competitor C (aligner) → WORK_C → sprint_contract_C
+
+**CRITICAL**: Spawn all 3 as PARALLEL Agent calls in a single message.
+This runs them simultaneously — no sequential waiting.
+
+After all complete, proceed to Step 5 for each valid output.
+
+### Step 5: Capture Diff & Create Generation(s)
+
+**In competition mode**: Do this for EACH competitor that produced a valid diff.
+Tag each generation with its strategy in the archive entry.
 
 After MetaAgent completes:
 
@@ -235,21 +282,37 @@ PYTHONIOENCODING=utf-8 python ~/.claude/ultragent/ua.py create-gen <parent_id> \
   ~/.claude/ultragent/generations/$NEXT_GEN/meta_reasoning.md
 ```
 
-### Step 7: Binary Keep/Discard Decision
+### Step 7: Competition Winner Selection + Keep/Discard
 
-Get the score and compare to best:
+**In competition mode** (3 candidates evaluated):
+1. Compare all candidates' score_deltas
+2. Pick the candidate with the highest score_delta (the "winner")
+3. DISCARD all losers with reason "lost competition to {winner}"
+4. Apply keep/discard to the winner only:
 
 ```python
-new_score = scores["aggregate"]
-best_score = metadata["best_score"]
+# Competition winner selection
+candidates = [
+    {"gen_id": "gen_A", "score_delta": 0.15, "strategy": "simplifier"},
+    {"gen_id": "gen_B", "score_delta": 0.22, "strategy": "exemplifier"},
+    {"gen_id": "gen_C", "score_delta": -0.03, "strategy": "aligner"},
+]
+winner = max(candidates, key=lambda c: c["score_delta"])
+# winner = gen_B (exemplifier)
 
-if new_score > best_score:
-    # KEEP — commit to frontier
-    ua.py keep $NEXT_GEN
+# Discard losers
+for c in candidates:
+    if c != winner:
+        ua.py discard c["gen_id"] f"lost competition to {winner['gen_id']} ({winner['strategy']})"
+
+# Keep/discard winner against current best
+if winner_aggregate > best_score:
+    ua.py keep winner["gen_id"]   # also auto-registers skill!
 else:
-    # DISCARD — log and move on
-    ua.py discard $NEXT_GEN "score {new_score} <= best {best_score}"
+    ua.py discard winner["gen_id"] "competition winner still below best"
 ```
+
+**Single agent mode**: Same as before — one candidate, simple keep/discard.
 
 ### Step 8: Report to User
 

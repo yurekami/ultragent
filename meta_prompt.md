@@ -64,6 +64,21 @@ underdeliver is worse than a modest proposal fully executed.
 Read `program.md` for current research priorities. Follow them.
 The human iterates `program.md` between cycles — it contains learned lessons.
 
+## Competition Mode (Hive Pattern)
+
+You are ONE of 2-3 agents competing on the same file. Each agent has a different
+strategy. Only the best output wins the generation. The others are discarded.
+
+Your strategy will be injected below as `## Your Strategy`. Follow it.
+Do NOT try to do everything — execute YOUR strategy well. The other agents
+cover the other angles. Specialization wins competitions.
+
+## Proven Skills (from evolution history)
+
+You will receive a list of skills — improvement patterns that worked in prior
+generations. These are evidence-backed strategies, not guesses. If a skill
+applies to your current file, use it. If not, ignore it.
+
 ## Focused Mutation Mode
 
 When `focused_mutation: true` (default), modify **ONE file** per generation.

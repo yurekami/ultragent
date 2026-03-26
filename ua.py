@@ -622,6 +622,138 @@ def evolve_targets_from_queue() -> list[dict]:
     return ranked
 
 
+# ─── Skills Registry (Hive pattern: reusable improvement patterns) ───────────
+
+SKILLS_FILE = ULTRAGENT_DIR / "skills.jsonl"
+
+
+def skill_register(
+    pattern_name: str,
+    description: str,
+    score_delta: float,
+    gen_id: str,
+    focus_file: str,
+    strategy: str = "",
+) -> dict:
+    """Register a proven improvement pattern from a KEPT generation."""
+    entry = {
+        "timestamp": now_iso(),
+        "pattern_name": pattern_name,
+        "description": description[:500],
+        "score_delta": round(score_delta, 4),
+        "gen_id": gen_id,
+        "focus_file": focus_file,
+        "strategy": strategy,
+        "times_applied": 1,
+    }
+    with open(SKILLS_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, default=str) + "\n")
+    return entry
+
+
+def skills_read() -> list[dict]:
+    """Read all registered skills."""
+    if not SKILLS_FILE.exists():
+        return []
+    entries = []
+    for line in SKILLS_FILE.read_text(encoding="utf-8").strip().split("\n"):
+        if line.strip():
+            entries.append(json.loads(line))
+    return entries
+
+
+def skills_ranked() -> list[dict]:
+    """Return skills sorted by score_delta (best first)."""
+    return sorted(skills_read(), key=lambda s: s.get("score_delta", 0), reverse=True)
+
+
+def auto_extract_skill(gen_id: str, score_delta: float) -> dict | None:
+    """
+    Auto-extract a skill from a KEPT generation.
+    Reads the meta_reasoning.md and sprint_contract.md to determine the pattern.
+    """
+    gen_dir = GENERATIONS_DIR / gen_id
+    entry = archive_get(gen_id)
+    if not entry:
+        return None
+
+    focus_file = entry.get("focus_file", "")
+
+    # Try to extract pattern from sprint contract
+    contract_file = gen_dir / "sprint_contract.md"
+    reasoning_file = gen_dir / "meta_reasoning.md"
+
+    description = ""
+    pattern_name = "unknown"
+
+    if contract_file.exists():
+        contract = contract_file.read_text(encoding="utf-8")
+        # Extract hypothesis line
+        for line in contract.split("\n"):
+            if line.strip().startswith("##") and "Hypothesis" in line:
+                continue
+            if line.strip() and "hypothesis" not in line.lower() and "##" not in line:
+                description = line.strip()
+                break
+        # Infer pattern name from planned changes
+        text = contract.lower()
+        if "simplif" in text or "compress" in text or "remov" in text or "reduc" in text:
+            pattern_name = "simplify"
+        elif "example" in text or "before/after" in text or "concrete" in text:
+            pattern_name = "add_examples"
+        elif "align" in text or "philosophy" in text or "claude.md" in text:
+            pattern_name = "align_philosophy"
+        elif "heading" in text:
+            pattern_name = "fix_structure"
+        elif "failure" in text or "error" in text:
+            pattern_name = "add_failure_modes"
+        else:
+            pattern_name = "improve"
+    elif reasoning_file.exists():
+        description = reasoning_file.read_text(encoding="utf-8")[:300]
+
+    if not description:
+        description = entry.get("description", f"Improvement to {focus_file}")
+
+    return skill_register(
+        pattern_name=pattern_name,
+        description=description,
+        score_delta=score_delta,
+        gen_id=gen_id,
+        focus_file=focus_file,
+        strategy=entry.get("strategy", ""),
+    )
+
+
+# ─── Competition (Hive pattern: multi-agent population search) ───────────────
+
+COMPETITION_STRATEGIES = [
+    {
+        "name": "simplifier",
+        "directive": "Your strategy is SIMPLIFICATION. Remove lines while preserving all information. Compression is your goal. A shorter file with identical behavioral coverage is the ideal outcome. Do NOT add content.",
+    },
+    {
+        "name": "exemplifier",
+        "directive": "Your strategy is EXEMPLIFICATION. Add concrete before/after code examples that demonstrate the boundary between correct and incorrect agent behavior. Specificity is your goal. Every example must show a REAL scenario.",
+    },
+    {
+        "name": "aligner",
+        "directive": "Your strategy is ALIGNMENT. Connect this file to the user's CLAUDE.md philosophy (verification-first, immutability, anti-genie rules). Add concrete checks, decision trees, or failure modes that reference these principles. Consistency is your goal.",
+    },
+]
+
+
+def get_competition_config() -> dict:
+    """Get competition configuration."""
+    cfg = config_read()
+    comp = cfg.get("competition", {})
+    return {
+        "enabled": comp.get("enabled", True),
+        "size": comp.get("size", 3),
+        "strategies": comp.get("strategies", COMPETITION_STRATEGIES),
+    }
+
+
 # ─── Commands ────────────────────────────────────────────────────────────────
 
 def cmd_init(_args: argparse.Namespace) -> None:
@@ -807,6 +939,12 @@ def cmd_keep(args: argparse.Namespace) -> None:
             reason=entry.get("description", "kept: score improved"),
             confidence="high", source="keep",
         )
+
+    # Auto-extract skill from KEPT generation (Hive pattern)
+    delta = score - best_score if score > best_score else score - (best_score * 0.95)
+    skill = auto_extract_skill(gen_id, delta)
+    if skill:
+        print(f"  Skill registered: {skill['pattern_name']} (delta={skill['score_delta']:+.4f})")
 
     print(f"  [KEEP] {gen_id} score={score:.4f}")
 
@@ -1231,6 +1369,33 @@ def cmd_drain_queue(_args: argparse.Namespace) -> None:
         print(f"  {d['agent_file']}  reason: {d.get('reason', '')[:60]}")
 
 
+def cmd_skills(_args: argparse.Namespace) -> None:
+    """Show registered improvement skills (proven patterns)."""
+    skills = skills_ranked()
+    if not skills:
+        print("No skills registered yet. Skills are auto-extracted from KEPT generations.")
+        return
+
+    print(f"=== Proven Skills ({len(skills)} registered) ===")
+    print(f"{'pattern':<20s}  {'delta':>7s}  {'gen':>10s}  {'file':<35s}  description")
+    print("-" * 110)
+    for s in skills:
+        print(f"  {s.get('pattern_name', '?'):<18s}  {s.get('score_delta', 0):>+.4f}  "
+              f"{s.get('gen_id', '?'):>10s}  {s.get('focus_file', ''):<35s}  "
+              f"{s.get('description', '')[:40]}")
+
+
+def cmd_competition(_args: argparse.Namespace) -> None:
+    """Show competition configuration."""
+    comp = get_competition_config()
+    print(f"=== Competition Config ===")
+    print(f"  Enabled: {comp['enabled']}")
+    print(f"  Size: {comp['size']} agents per generation")
+    print(f"  Strategies:")
+    for s in comp["strategies"]:
+        print(f"    - {s['name']}: {s['directive'][:70]}...")
+
+
 # ─── CLI ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1303,6 +1468,8 @@ def main():
 
     sub.add_parser("pending-evolves", help="Show pending evolves")
     sub.add_parser("drain-queue", help="Process evolve queue")
+    sub.add_parser("skills", help="Show proven improvement skills")
+    sub.add_parser("competition", help="Show competition config")
 
     args = parser.parse_args()
 
@@ -1319,6 +1486,7 @@ def main():
         "capture": cmd_capture, "trajectories": cmd_trajectories,
         "queue-evolve": cmd_queue_evolve, "pending-evolves": cmd_pending_evolves,
         "drain-queue": cmd_drain_queue,
+        "skills": cmd_skills, "competition": cmd_competition,
     }
 
     if args.command in commands:
