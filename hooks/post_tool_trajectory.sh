@@ -14,8 +14,11 @@
 # Detects: Agent tool failures, repeated errors, user corrections.
 # Actions: Captures trajectory, queues evolve if failure pattern detected.
 
-HA_PY="$HOME/.claude/ultragent/ua.py"
-TRACKER="$HOME/.claude/ultragent/.failure_tracker"
+# Resolve plugin root (hooks/ is at plugin root, ua.py is at plugin root)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
+HA_PY="$PLUGIN_ROOT/ua.py"
+TRACKER="$PLUGIN_ROOT/.failure_tracker"
 
 # Only act on Agent tool calls (subagent spawns)
 if [[ "$CLAUDE_TOOL_NAME" != "Agent" ]]; then

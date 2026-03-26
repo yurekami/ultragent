@@ -13,7 +13,7 @@ DeerFlow, codex-autoresearch, AutoKernel, Agent Laboratory, OpenClaw, and DeepTu
 
 ## Live Status
 
-!`PYTHONIOENCODING=utf-8 python ~/.claude/ultragent/ua.py status 2>/dev/null || echo "Not initialized. Run: PYTHONIOENCODING=utf-8 python ~/.claude/ultragent/ua.py init"`
+!`PYTHONIOENCODING=utf-8 python ${CLAUDE_SKILL_DIR}/../../ua.py status 2>/dev/null || echo "Not initialized. Run: PYTHONIOENCODING=utf-8 python ${CLAUDE_SKILL_DIR}/../../ua.py init"`
 
 ## Command Routing
 
@@ -40,23 +40,26 @@ Route `$ARGUMENTS` to the appropriate action:
 | `context [estimate\|assemble]` | Context engine: `context_engine.py $1` |
 | `benchmark [task_id]` | Run benchmarks: `evaluate.py benchmark-prep $1` |
 
-All commands use: `PYTHONIOENCODING=utf-8 python ~/.claude/ultragent/<script>`
+All commands use: `PYTHONIOENCODING=utf-8 python ${CLAUDE_SKILL_DIR}/../../<script>`
 
 ## Paths
 
+The plugin root is two levels up from the skill directory (`${CLAUDE_SKILL_DIR}/../../`).
+All Python scripts live at the plugin root.
+
 ```
-HA      = ~/.claude/ultragent
-HA_PY   = $HA/ua.py
-EVAL_PY = $HA/evaluate.py
-PROGRAM = $HA/program.md
-META    = $HA/meta_prompt.md
+PLUGIN_ROOT = ${CLAUDE_SKILL_DIR}/../..    (resolved at runtime)
+UA_PY       = $PLUGIN_ROOT/ua.py
+EVAL_PY     = $PLUGIN_ROOT/evaluate.py
+PROGRAM     = $PLUGIN_ROOT/program.md
+META        = $PLUGIN_ROOT/meta_prompt.md
 ```
 
 ## Quick Actions
 
 ### Init
 ```bash
-PYTHONIOENCODING=utf-8 python ~/.claude/ultragent/ua.py init
+PYTHONIOENCODING=utf-8 python ${CLAUDE_SKILL_DIR}/../../ua.py init
 ```
 
 ### Evolve (the core loop)
@@ -77,15 +80,15 @@ Summary: For each cycle:
 
 ### Retro
 ```bash
-PYTHONIOENCODING=utf-8 python ~/.claude/ultragent/ua.py retro
+PYTHONIOENCODING=utf-8 python ${CLAUDE_SKILL_DIR}/../../ua.py retro
 ```
 Analyzes results.tsv + trajectories + lessons → updates program.md + evolution_memory.json.
 
 ### Promote
 **Always show diff and ask confirmation:**
 ```bash
-PYTHONIOENCODING=utf-8 python ~/.claude/ultragent/ua.py diff <gen_id>
-PYTHONIOENCODING=utf-8 python ~/.claude/ultragent/ua.py promote <gen_id>
+PYTHONIOENCODING=utf-8 python ${CLAUDE_SKILL_DIR}/../../ua.py diff <gen_id>
+PYTHONIOENCODING=utf-8 python ${CLAUDE_SKILL_DIR}/../../ua.py promote <gen_id>
 ```
 
 ## Key Principles

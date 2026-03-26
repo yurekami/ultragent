@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "tool == \"Agent\"",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_SKILL_DIR}/../../hooks/post_tool_trajectory.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "ultragent",
+  "description": "Self-improving agent configuration system. Evolves your Claude Code agent prompts, rules, and skills through an autonomous evolutionary loop with keep/discard scoring, trajectory-driven optimization, and multi-agent evaluation.",
+  "version": "1.0.0",
+  "author": {
+    "name": "yurekami"
+  },
+  "repository": "https://github.com/yurekami/ultragent",
+  "license": "MIT",
+  "homepage": "https://github.com/yurekami/ultragent"
+}

@@ -228,9 +228,18 @@ There is no partial credit. Make changes that measurably improve the score.
 
 ## Your Process
 
+You may be operating in one of two modes:
+
+**Editor Mode** (when a sprint contract is provided in your task):
+1. **Read the sprint contract** — This is your mandate. The Strategist already analyzed context.
+2. **Execute the planned changes** — Follow the contract precisely. One file. Surgical precision.
+3. **Self-review** — Does this contradict other config? Does it align with user philosophy?
+4. **Write reasoning** — What you changed, why, expected impact, what to try next
+
+**Full Mode** (when no sprint contract is provided — single-agent evolution):
 1. **Read program.md** — What are the current priorities?
 2. **Read archive/results** — What has been tried? What worked? What failed?
-3. **Identify the highest-leverage change** — What single edit would move the score most?
+3. **Write sprint contract** — Propose what to change before editing
 4. **Implement** — Make the edit. One file. Surgical precision.
 5. **Self-review** — Does this contradict other config? Does it align with user philosophy?
 6. **Write reasoning** — What you changed, why, expected impact, what to try next

@@ -59,6 +59,34 @@ EVOLVE_QUEUE_FILE = ULTRAGENT_DIR / "evolve_queue.jsonl"
 LESSONS_FILE = ULTRAGENT_DIR / "lessons.jsonl"
 RETRO_DIR = ULTRAGENT_DIR / "retro_reports"
 EVOLUTION_MEMORY_FILE = ULTRAGENT_DIR / "evolution_memory.json"
+SESSION_REFLECTIONS_FILE = ULTRAGENT_DIR / "session_reflections.jsonl"
+
+# ─── Spawn Depth Tracking (OpenClaw agent scope pattern) ─────────────────────
+
+SPAWN_ROLE_ORCHESTRATOR = "orchestrator"  # Can spawn children
+SPAWN_ROLE_METAAGENT = "metaagent"        # The Opus editor, depth 1
+SPAWN_ROLE_STRATEGIST = "analyst"       # Sonnet, investigation report + sprint contract (dual-loop)
+SPAWN_ROLE_EDITOR = "editor"              # Opus, executes the sprint contract
+SPAWN_ROLE_COMPETITOR = "competitor"       # Competition candidate, depth 1
+SPAWN_ROLE_JUDGE = "judge"                # Evaluation judge, depth 1
+SPAWN_ROLE_RETRY = "retry"                # Debug retry, depth 2
+SPAWN_ROLE_LEAF = "leaf"                  # Cannot spawn further
+
+SPAWN_MAX_DEPTH = 2  # Orchestrator(0) → MetaAgent/Judge(1) → Retry(2)
+
+SPAWN_DEPTH_MAP = {
+    SPAWN_ROLE_ORCHESTRATOR: 0,
+    SPAWN_ROLE_METAAGENT: 1,
+    SPAWN_ROLE_STRATEGIST: 1,
+    SPAWN_ROLE_EDITOR: 1,
+    SPAWN_ROLE_COMPETITOR: 1,
+    SPAWN_ROLE_JUDGE: 1,
+    SPAWN_ROLE_RETRY: 2,
+    SPAWN_ROLE_LEAF: 2,
+}
+
+# Which roles can spawn children
+SPAWN_CAN_SPAWN = {SPAWN_ROLE_ORCHESTRATOR}
 
 # ─── Genome Definition ───────────────────────────────────────────────────────
 
@@ -1264,59 +1292,95 @@ def evolution_memory_update() -> dict:
             "best_on": stats["best_on"][:5],
         }
 
-    # ── Facts (extracted from high-signal patterns) ──
+    # ── Facts with Citations (DeepTutor InvestigateMemory pattern) ──
     facts = []
+    fact_counter = 0
+
+    def _make_fact(content, category, confidence, source, evidence_gens=None, source_file=None):
+        nonlocal fact_counter
+        fact_counter += 1
+        retro_num = len(list(RETRO_DIR.glob("retro_*.md"))) if RETRO_DIR.exists() else 0
+        return {
+            "cite_id": f"retro_{retro_num + 1:03d}_fact_{fact_counter:02d}",
+            "content": content,
+            "category": category,
+            "confidence": confidence,
+            "source": source,
+            "source_file": source_file or "",
+            "evidence_gens": evidence_gens or [],
+            "created_at": now_iso(),
+        }
 
     # Fact: strategy that never wins
     for s, stats in strategy_stats.items():
         if stats["total"] >= 5 and stats["kept"] == 0:
-            facts.append({
-                "content": f"Strategy '{s}' has never produced a kept generation ({stats['total']} attempts)",
-                "category": "strategy",
-                "confidence": 0.95,
-                "source": "retro_analysis",
-            })
+            # Collect evidence: which generations used this strategy and were discarded
+            evidence = [
+                e.get("gen_id", "") for e in archive
+                if e.get("strategy") == s and e.get("status") == "discard"
+            ][:10]
+            facts.append(_make_fact(
+                content=f"Strategy '{s}' has never produced a kept generation ({stats['total']} attempts)",
+                category="strategy",
+                confidence=0.95,
+                source="retro_analysis",
+                evidence_gens=evidence,
+            ))
 
     # Fact: file at local optimum
     for f, insight in memory["file_insights"].items():
         if insight["total_attempts"] >= 4 and insight["kept"] == 0:
-            facts.append({
-                "content": f"File '{f}' appears stuck — 0/{insight['total_attempts']} kept. May need radically different approach.",
-                "category": "file_health",
-                "confidence": 0.85,
-                "source": "retro_analysis",
-            })
+            evidence = [
+                e.get("gen_id", "") for e in archive
+                if e.get("focus_file") == f and e.get("status") in ("discard", "crash")
+            ][:10]
+            facts.append(_make_fact(
+                content=f"File '{f}' appears stuck -- 0/{insight['total_attempts']} kept. May need radically different approach.",
+                category="file_health",
+                confidence=0.85,
+                source="retro_analysis",
+                evidence_gens=evidence,
+                source_file=f,
+            ))
 
     # Fact: score plateau
     if score_trend == "stalled" and stalled_since:
-        facts.append({
-            "content": f"Score has plateaued since {stalled_since}. Consider changing parent selection strategy or targeting different files.",
-            "category": "evolution",
-            "confidence": 0.9,
-            "source": "retro_analysis",
-        })
+        facts.append(_make_fact(
+            content=f"Score has plateaued since {stalled_since}. Consider changing parent selection strategy or targeting different files.",
+            category="evolution",
+            confidence=0.9,
+            source="retro_analysis",
+            evidence_gens=[stalled_since],
+        ))
 
     # Fact: high-failure agents from trajectories
     for agent, counts in traj_summary.items():
         total_a = counts.get("total", 0)
         fails = counts.get("failure", 0) + counts.get("correction", 0)
         if total_a >= 5 and fails / total_a > 0.4:
-            facts.append({
-                "content": f"Agent '{agent}' has {fails}/{total_a} failure rate in production — high priority for evolution.",
-                "category": "agent_health",
-                "confidence": 0.9,
-                "source": "trajectory_analysis",
-            })
+            facts.append(_make_fact(
+                content=f"Agent '{agent}' has {fails}/{total_a} failure rate in production -- high priority for evolution.",
+                category="agent_health",
+                confidence=0.9,
+                source="trajectory_analysis",
+                source_file=agent,
+            ))
 
     # Fact: what works
     for f, insight in memory["file_insights"].items():
         if insight["responsiveness"] > 0.5 and insight["total_attempts"] >= 3:
-            facts.append({
-                "content": f"File '{f}' responds well to evolution ({insight['responsiveness']:.0%} keep rate, best via {insight['best_strategy']}).",
-                "category": "file_health",
-                "confidence": 0.85,
-                "source": "retro_analysis",
-            })
+            evidence = [
+                e.get("gen_id", "") for e in archive
+                if e.get("focus_file") == f and e.get("status") == "keep"
+            ][:10]
+            facts.append(_make_fact(
+                content=f"File '{f}' responds well to evolution ({insight['responsiveness']:.0%} keep rate, best via {insight['best_strategy']}).",
+                category="file_health",
+                confidence=0.85,
+                source="retro_analysis",
+                evidence_gens=evidence,
+                source_file=f,
+            ))
 
     memory["facts"] = facts
 
@@ -1351,6 +1415,45 @@ def get_competition_config() -> dict:
         "size": comp.get("size", 3),
         "strategies": comp.get("strategies", COMPETITION_STRATEGIES),
     }
+
+
+# ─── Judge Personalities (Agent Laboratory ReviewersAgent pattern) ────────────
+
+JUDGE_PERSONALITIES = [
+    {
+        "name": "behavioral",
+        "system_prefix": (
+            "You are a pragmatic reviewer focused on real-world agent behavior. "
+            "Evaluate whether the changes would actually improve how the agent "
+            "performs in practice. Prioritize concrete behavioral improvements "
+            "over cosmetic changes. A change that adds a useful decision tree "
+            "is worth more than one that reformats headings."
+        ),
+    },
+    {
+        "name": "quality",
+        "system_prefix": (
+            "You are a code quality reviewer focused on clarity, conciseness, "
+            "and structural soundness. Evaluate whether the prompt is well-organized, "
+            "free of redundancy, and follows best practices for agent instructions. "
+            "Simpler is better. Removing bloat while preserving behavior is a win."
+        ),
+    },
+    {
+        "name": "philosophy",
+        "system_prefix": (
+            "You are an alignment reviewer focused on consistency with the user's "
+            "CLAUDE.md philosophy: verification-first, immutability, anti-genie rules, "
+            "TDD, evidence over assumptions. Evaluate whether the changes strengthen "
+            "or weaken alignment with these principles. Contradictions are regressions."
+        ),
+    },
+]
+
+
+def get_judge_personalities() -> list[dict]:
+    """Get the judge personalities for ensemble evaluation."""
+    return JUDGE_PERSONALITIES
 
 
 # ─── Commands ────────────────────────────────────────────────────────────────
@@ -1553,6 +1656,12 @@ def cmd_keep(args: argparse.Namespace) -> None:
     if lesson:
         update_program_lessons()
         print(f"  Lesson recorded: {lesson['lesson'][:80]}")
+
+    # In-session reflection (Agent Laboratory MLESolver pattern)
+    reflection = reflect_on_generation(gen_id)
+    if reflection:
+        session_reflection_record(gen_id, reflection)
+        print(f"  Reflection: {reflection[:100]}")
 
     print(f"  [KEEP] {gen_id} score={score:.4f}")
 
@@ -2427,6 +2536,256 @@ def cmd_memory(_args: argparse.Namespace) -> None:
             print(f"    [{cat}] ({conf:.0%}) {fact['content'][:90]}")
 
 
+# ─── In-Session Reflection (Agent Laboratory MLESolver pattern) ──────────────
+
+def reflect_on_generation(gen_id: str) -> str | None:
+    """
+    Generate a reflection after a KEPT generation.
+    Inspired by Agent Laboratory's MLESolver.reflect_code() which extracts
+    generalizable insights from successful code changes.
+
+    Reads the sprint contract + meta_reasoning + scores to produce a 1-3 sentence
+    insight for the next MetaAgent.
+    """
+    gen_dir = GENERATIONS_DIR / gen_id
+    parts = []
+
+    # Sprint contract hypothesis
+    contract_file = gen_dir / "sprint_contract.md"
+    if contract_file.exists():
+        contract = contract_file.read_text(encoding="utf-8")
+        for line in contract.split("\n"):
+            if "hypothesis" in line.lower() and not line.startswith("#"):
+                continue
+            if line.strip() and not line.startswith("#") and len(line.strip()) > 20:
+                parts.append(f"Hypothesis: {line.strip()[:200]}")
+                break
+
+    # What changed
+    reasoning_file = gen_dir / "meta_reasoning.md"
+    if reasoning_file.exists():
+        reasoning = reasoning_file.read_text(encoding="utf-8")
+        first_para = reasoning.split("\n\n")[0][:200]
+        parts.append(f"Change: {first_para}")
+
+    # Score
+    scores_file = gen_dir / "scores.json"
+    if scores_file.exists():
+        scores = json.loads(scores_file.read_text(encoding="utf-8"))
+        agg = scores.get("aggregate", 0)
+        struct = scores.get("structural", 0)
+        parts.append(f"Score: aggregate={agg}, structural={struct}")
+
+    # Focus file
+    entry = archive_get(gen_id)
+    focus = entry.get("focus_file", "") if entry else ""
+    if focus:
+        parts.append(f"File: {focus}")
+
+    if not parts:
+        return None
+
+    return " | ".join(parts)
+
+
+def session_reflection_record(gen_id: str, reflection: str) -> dict:
+    """Record a session reflection for within-session learning."""
+    entry = {
+        "timestamp": now_iso(),
+        "gen_id": gen_id,
+        "reflection": reflection[:500],
+    }
+    with open(SESSION_REFLECTIONS_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, default=str) + "\n")
+    return entry
+
+
+def session_reflections_read(last_n: int = 5) -> list[dict]:
+    """Read recent session reflections for MetaAgent context injection."""
+    if not SESSION_REFLECTIONS_FILE.exists():
+        return []
+    entries = []
+    for line in SESSION_REFLECTIONS_FILE.read_text(encoding="utf-8").strip().split("\n"):
+        if line.strip():
+            entries.append(json.loads(line))
+    return entries[-last_n:] if last_n else entries
+
+
+def session_reflections_clear() -> None:
+    """Clear session reflections (call at start of new evolve session)."""
+    if SESSION_REFLECTIONS_FILE.exists():
+        SESSION_REFLECTIONS_FILE.unlink()
+
+
+def cmd_reflections(_args: argparse.Namespace) -> None:
+    """Show recent in-session reflections."""
+    reflections = session_reflections_read(10)
+    if not reflections:
+        print("No session reflections yet. Reflections are auto-generated after each KEEP.")
+        return
+
+    print(f"=== Session Reflections ({len(reflections)} recent) ===")
+    for r in reflections:
+        ts = r.get("timestamp", "")[:19]
+        gen = r.get("gen_id", "?")
+        ref = r.get("reflection", "")[:120]
+        print(f"  [{gen}] {ts}  {ref}")
+
+
+# ─── Spawn Depth Tracking Functions ──────────────────────────────────────────
+
+SPAWN_LOG_FILE = ULTRAGENT_DIR / "spawn_log.jsonl"
+
+
+def spawn_log_entry(
+    gen_id: str,
+    role: str,
+    depth: int,
+    parent_role: str = "",
+    model: str = "",
+    strategy: str = "",
+    outcome: str = "",
+    tokens_used: int = 0,
+    duration_s: float = 0,
+) -> dict:
+    """Record a spawn event for audit and analysis."""
+    entry = {
+        "timestamp": now_iso(),
+        "gen_id": gen_id,
+        "role": role,
+        "depth": depth,
+        "parent_role": parent_role,
+        "model": model,
+        "strategy": strategy,
+        "outcome": outcome,
+        "tokens_used": tokens_used,
+        "duration_s": round(duration_s, 1),
+        "can_spawn": role in SPAWN_CAN_SPAWN,
+    }
+    with open(SPAWN_LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, default=str) + "\n")
+    return entry
+
+
+def spawn_log_read(last_n: int | None = None) -> list[dict]:
+    """Read spawn log entries."""
+    if not SPAWN_LOG_FILE.exists():
+        return []
+    entries = []
+    for line in SPAWN_LOG_FILE.read_text(encoding="utf-8").strip().split("\n"):
+        if line.strip():
+            entries.append(json.loads(line))
+    return entries[-last_n:] if last_n else entries
+
+
+def spawn_summary(gen_id: str | None = None) -> dict:
+    """
+    Summarize spawn tree for a generation or all generations.
+    Returns per-role counts, depths, and budget usage.
+    """
+    entries = spawn_log_read()
+    if gen_id:
+        entries = [e for e in entries if e.get("gen_id") == gen_id]
+
+    summary = {
+        "total_spawns": len(entries),
+        "by_role": {},
+        "by_depth": {},
+        "max_depth_observed": 0,
+        "total_tokens": 0,
+        "total_duration_s": 0,
+        "depth_violations": 0,
+    }
+
+    for e in entries:
+        role = e.get("role", "unknown")
+        depth = e.get("depth", 0)
+
+        summary["by_role"].setdefault(role, {"count": 0, "tokens": 0, "outcomes": {}})
+        summary["by_role"][role]["count"] += 1
+        summary["by_role"][role]["tokens"] += e.get("tokens_used", 0)
+        outcome = e.get("outcome", "unknown")
+        summary["by_role"][role]["outcomes"][outcome] = (
+            summary["by_role"][role]["outcomes"].get(outcome, 0) + 1
+        )
+
+        summary["by_depth"].setdefault(depth, 0)
+        summary["by_depth"][depth] += 1
+
+        summary["max_depth_observed"] = max(summary["max_depth_observed"], depth)
+        summary["total_tokens"] += e.get("tokens_used", 0)
+        summary["total_duration_s"] += e.get("duration_s", 0)
+
+        if depth > SPAWN_MAX_DEPTH:
+            summary["depth_violations"] += 1
+
+    return summary
+
+
+def validate_spawn(role: str, parent_role: str = "") -> dict:
+    """
+    Validate whether a spawn is allowed.
+    Returns {allowed: bool, reason: str, depth: int}
+    """
+    depth = SPAWN_DEPTH_MAP.get(role, 0)
+
+    # Check depth limit
+    if depth > SPAWN_MAX_DEPTH:
+        return {
+            "allowed": False,
+            "reason": f"Depth {depth} exceeds max {SPAWN_MAX_DEPTH} for role '{role}'",
+            "depth": depth,
+        }
+
+    # Check if parent can spawn
+    if parent_role and parent_role not in SPAWN_CAN_SPAWN:
+        return {
+            "allowed": False,
+            "reason": f"Parent role '{parent_role}' cannot spawn children (only {SPAWN_CAN_SPAWN})",
+            "depth": depth,
+        }
+
+    return {"allowed": True, "reason": "ok", "depth": depth}
+
+
+def cmd_spawn_log(args: argparse.Namespace) -> None:
+    """Show spawn log and summary."""
+    gen_id = args.gen_id if hasattr(args, "gen_id") and args.gen_id else None
+    summary = spawn_summary(gen_id)
+
+    title = f"Spawn Log for {gen_id}" if gen_id else "Spawn Log (all generations)"
+    print(f"=== {title} ===")
+    print(f"  Total spawns: {summary['total_spawns']}")
+    print(f"  Max depth observed: {summary['max_depth_observed']} (limit: {SPAWN_MAX_DEPTH})")
+    if summary["depth_violations"] > 0:
+        print(f"  DEPTH VIOLATIONS: {summary['depth_violations']}")
+    print(f"  Total tokens: {summary['total_tokens']:,}")
+    print(f"  Total duration: {summary['total_duration_s']:.0f}s")
+
+    if summary["by_role"]:
+        print(f"\n  By role:")
+        for role, data in sorted(summary["by_role"].items()):
+            outcomes = ", ".join(f"{k}={v}" for k, v in data["outcomes"].items())
+            print(f"    {role:<20} count={data['count']}  tokens={data['tokens']:,}  [{outcomes}]")
+
+    if summary["by_depth"]:
+        print(f"\n  By depth:")
+        for depth, count in sorted(summary["by_depth"].items()):
+            marker = " (OVER LIMIT)" if depth > SPAWN_MAX_DEPTH else ""
+            print(f"    depth {depth}: {count} spawns{marker}")
+
+    # Show recent entries
+    entries = spawn_log_read(10)
+    if gen_id:
+        entries = [e for e in entries if e.get("gen_id") == gen_id]
+    if entries:
+        print(f"\n  Recent spawns:")
+        for e in entries[-8:]:
+            print(f"    [{e.get('role', '?'):<15}] depth={e.get('depth', '?')}  "
+                  f"gen={e.get('gen_id', '?')}  model={e.get('model', '?')}  "
+                  f"outcome={e.get('outcome', '?')}  {e.get('duration_s', 0):.0f}s")
+
+
 # ─── Stuck Recovery (codex-autoresearch PIVOT/REFINE pattern) ──────────────
 
 REFINE_THRESHOLD = 3   # consecutive discards before REFINE
@@ -2677,6 +3036,50 @@ def cmd_fingerprint(_args: argparse.Namespace) -> None:
     print(f"    After 2+ compactions: every generation")
 
 
+def cmd_context(args: argparse.Namespace) -> None:
+    """Context engine: estimate token usage or assemble context."""
+    # Look in both the ultragent install dir and the script's own directory
+    context_engine = ULTRAGENT_DIR / "context_engine.py"
+    if not context_engine.exists():
+        context_engine = Path(__file__).resolve().parent / "context_engine.py"
+    if not context_engine.exists():
+        print("Error: context_engine.py not found.")
+        return
+
+    action = args.action if hasattr(args, "action") and args.action else "estimate"
+    cmd_parts = [
+        sys.executable, str(context_engine), action,
+    ]
+    if action == "assemble":
+        if hasattr(args, "budget") and args.budget:
+            cmd_parts.extend(["--budget", str(args.budget)])
+        if hasattr(args, "model") and args.model:
+            cmd_parts.extend(["--model", args.model])
+
+    import subprocess
+    result = subprocess.run(cmd_parts, capture_output=False, text=True)
+
+
+def cmd_circuit(args: argparse.Namespace) -> None:
+    """Circuit breaker: check LLM API health."""
+    cb_file = ULTRAGENT_DIR / "circuit_breaker.py"
+    if not cb_file.exists():
+        cb_file = Path(__file__).resolve().parent / "circuit_breaker.py"
+    if not cb_file.exists():
+        print("Error: circuit_breaker.py not found.")
+        return
+
+    action = args.action if hasattr(args, "action") and args.action else "status"
+    cmd_parts = [sys.executable, str(cb_file), action]
+    if action in ("record", "check", "reset") and hasattr(args, "model_name") and args.model_name:
+        cmd_parts.append(args.model_name)
+    if action == "record" and hasattr(args, "call_result") and args.call_result:
+        cmd_parts.append(args.call_result)
+
+    import subprocess
+    subprocess.run(cmd_parts, capture_output=False, text=True)
+
+
 # ─── CLI ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -2758,6 +3161,21 @@ def main():
     sub.add_parser("stuck-check", help="Check stuck recovery status")
     sub.add_parser("fingerprint", help="Protocol fingerprint check items")
 
+    ctx_est = sub.add_parser("context", help="Context engine: estimate or assemble")
+    ctx_est.add_argument("action", nargs="?", default="estimate", choices=["estimate", "assemble"])
+    ctx_est.add_argument("--budget", type=int, default=None)
+    ctx_est.add_argument("--model", default="opus", choices=["opus", "sonnet", "haiku"])
+
+    cb = sub.add_parser("circuit", help="Circuit breaker: LLM API health")
+    cb.add_argument("action", nargs="?", default="status", choices=["status", "record", "check", "reset"])
+    cb.add_argument("model_name", nargs="?", help="Model name (for record/check/reset)")
+    cb.add_argument("call_result", nargs="?", choices=["success", "failure"], help="Call result (for record)")
+
+    sl = sub.add_parser("spawn-log", help="Show spawn depth tracking log")
+    sl.add_argument("gen_id", nargs="?", help="Filter by generation")
+
+    sub.add_parser("reflections", help="Show in-session reflections")
+
     args = parser.parse_args()
 
     commands = {
@@ -2778,6 +3196,10 @@ def main():
         "memory": cmd_memory,
         "stuck-check": cmd_stuck_check,
         "fingerprint": cmd_fingerprint,
+        "context": cmd_context,
+        "circuit": cmd_circuit,
+        "spawn-log": cmd_spawn_log,
+        "reflections": cmd_reflections,
     }
 
     if args.command in commands:
