@@ -11,12 +11,39 @@ One score. One objective. Higher is better.
 
 You have a HARD LIMIT of 12 tool calls. Plan every action before acting.
 
-Budget your 12 calls:
-- 1 call:  Read the focus file (if not already provided in context)
+### Optimal Budget (aim for 4-6 calls total)
 - 1 call:  Bash: write sprint_contract.md
 - 1 call:  Bash: write the COMPLETE new version of the focus file
 - 1 call:  Bash: write meta_reasoning.md
-- 8 spare: For reading other files, verification, etc.
+- 1-3 spare: ONLY if you genuinely need to read a file NOT in your context
+
+### Loop Detection Rules (CRITICAL — DeerFlow Pattern)
+
+**NEVER re-read.** Track every Read/Bash call mentally. Before ANY tool call, ask:
+1. "Have I already seen this content?" → If yes, USE YOUR MEMORY. Do not re-read.
+2. "Is this already in my `<context>` block?" → If yes, it's RIGHT ABOVE. Do not read it.
+3. "Do I actually need this file?" → If no clear reason, SKIP IT.
+
+**Pre-loaded content (ALREADY in your context — DO NOT read these):**
+- The focus file contents → provided in `## Current Genome: {focus_file}`
+- program.md → provided in `## Research Directives`
+- Archive status → provided in `## Archive Status`
+- Results history → provided in `## Recent Experiments`
+- Lessons → provided in `## Lessons for {focus_file}`
+- Evolution memory → provided in `## Evolution Memory` (if available)
+
+**Wasted call patterns (these are BUGS in your reasoning):**
+- Reading the focus file when it's in your context = WASTED CALL
+- Running `ls` or `find` in the workspace = WASTED CALL (you know the structure)
+- Reading program.md = WASTED CALL (it's in your context)
+- Reading the same file twice = WASTED CALL
+- Reading CLAUDE.md "for alignment" = WASTED CALL unless you're the aligner strategy
+
+**Ideal execution (4 calls):**
+1. Bash: write sprint_contract.md
+2. Bash: write the modified focus file
+3. Bash: write meta_reasoning.md
+4. Bash: verify the file was written (`wc -l $WORK_DIR/path/to/file.md`)
 
 ## FILE WRITES: USE BASH ONLY (CRITICAL)
 
@@ -36,7 +63,27 @@ This applies to ALL files you create:
 - `meta_reasoning.md` → `cat > $WORK_DIR/meta_reasoning.md << 'ENDOFFILE' ... ENDOFFILE`
 
 Plan ALL content in your thinking, then write each file in ONE Bash call.
-Reading a file 3 times is wasteful. Read once, plan, write once.
+
+### Error Recovery Protocol (DeerFlow Pattern)
+
+If a Bash write fails, DO NOT PANIC. Diagnose and fix:
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `ENDOFFILE: not found` | Content contains unquoted `ENDOFFILE` | Use a different delimiter: `<< 'ULTRAEOF'` ... `ULTRAEOF` |
+| `syntax error near unexpected token` | Unescaped backticks or special chars in content | Escape with `\`` or use `cat > file << 'DELIM'` (single-quoted delimiter disables expansion) |
+| `Permission denied` | Wrong path or read-only directory | Check `$WORK_DIR` is set and writable: `ls -la $WORK_DIR/` |
+| `No such file or directory` | Parent directory missing | `mkdir -p $(dirname $WORK_DIR/path/to/file)` first |
+| File is empty after write | Heredoc delimiter was indented | Delimiter MUST be at column 0, no leading spaces |
+| File has wrong content | Variable expansion in heredoc | Use SINGLE-quoted delimiter: `<< 'EOF'` not `<< EOF` |
+
+**Verify EVERY write** (costs 1 call but prevents crashes):
+```bash
+wc -l $WORK_DIR/path/to/file.md && head -3 $WORK_DIR/path/to/file.md
+```
+
+If verification shows the file is empty or wrong, you have budget to retry once.
+A verified write is worth more than an extra read.
 
 ## Sprint Contract (MANDATORY)
 

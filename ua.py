@@ -57,6 +57,8 @@ PROGRAM_FILE = ULTRAGENT_DIR / "program.md"
 TRAJECTORIES_FILE = ULTRAGENT_DIR / "trajectories.jsonl"
 EVOLVE_QUEUE_FILE = ULTRAGENT_DIR / "evolve_queue.jsonl"
 LESSONS_FILE = ULTRAGENT_DIR / "lessons.jsonl"
+RETRO_DIR = ULTRAGENT_DIR / "retro_reports"
+EVOLUTION_MEMORY_FILE = ULTRAGENT_DIR / "evolution_memory.json"
 
 # ─── Genome Definition ───────────────────────────────────────────────────────
 
@@ -419,6 +421,100 @@ def score_structural(gen_dir: Path) -> dict[str, Any]:
             if code_blocks + tables > 0:
                 fs = min(fs + 0.05, 1.0)
 
+            # ── Commandment-based quality checks ──
+            # Anti-genie: penalize patterns that invite shortcut behavior
+            antigenie_patterns = [
+                r"\b(?:ts-ignore|@ts-ignore|eslint-disable)\b",
+                r"\bskip\s+(?:test|check|validation)\b",
+                r"\bignore\s+(?:error|warning|failure)\b",
+                r"\bany\b\s*(?:type|cast)\b",
+            ]
+            antigenie_count = sum(
+                len(re.findall(p, content, re.IGNORECASE))
+                for p in antigenie_patterns
+            )
+            if antigenie_count > 0:
+                fi.append(f"anti-genie violation: {antigenie_count} shortcut patterns")
+                fs -= 0.15 * min(antigenie_count, 3)
+
+            # Verification-first: reward explicit verification/testing references
+            verification_patterns = [
+                r"\bverif(?:y|ied|ication)\b",
+                r"\bvalidat(?:e|ion|ed)\b",
+                r"\btest(?:ing|s|ed)?\b.*\bbefore\b",
+                r"\bcheck\b.*\bbefore\b(?:.*\b(?:commit|push|deploy|claim)\b)",
+                r"\bevidence\b",
+            ]
+            verification_count = sum(
+                1 for p in verification_patterns
+                if re.search(p, content, re.IGNORECASE)
+            )
+            if verification_count >= 3:
+                fs = min(fs + 0.08, 1.0)
+            elif verification_count >= 1:
+                fs = min(fs + 0.03, 1.0)
+
+            # Error recovery: reward explicit "when X fails, do Y" patterns
+            recovery_patterns = [
+                r"\bwhen\b.*\bfail",
+                r"\bif\b.*\berror\b.*\bthen\b",
+                r"\bfallback\b",
+                r"\brecover(?:y|ing)?\b",
+                r"\bretry\b.*\bstrateg",
+                r"\bon\s+failure\b",
+            ]
+            recovery_count = sum(
+                1 for p in recovery_patterns
+                if re.search(p, content, re.IGNORECASE)
+            )
+            if recovery_count >= 2:
+                fs = min(fs + 0.05, 1.0)
+
+            # Promise inflation: penalize overclaiming without evidence
+            overclaim_patterns = [
+                r"\balways\s+(?:ensures?|guarantees?|works?)\b",
+                r"\bnever\s+fails?\b",
+                r"\bperfect(?:ly)?\s+(?:handles?|solves?)\b",
+                r"\b100%\s+(?:accurate|reliable|safe)\b",
+            ]
+            overclaim_count = sum(
+                len(re.findall(p, content, re.IGNORECASE))
+                for p in overclaim_patterns
+            )
+            if overclaim_count > 2:
+                fi.append(f"promise inflation ({overclaim_count} overclaims)")
+                fs -= 0.05
+
+            # Immutability awareness: reward mentioning immutable patterns
+            immutability_patterns = [
+                r"\bimmutab(?:le|ility)\b",
+                r"\bnew\s+object\b",
+                r"\bspread\s+operator\b",
+                r"\bdon'?t\s+mutat",
+                r"\bnever\s+mutat",
+                r"\bpure\s+function",
+            ]
+            immutability_count = sum(
+                1 for p in immutability_patterns
+                if re.search(p, content, re.IGNORECASE)
+            )
+            if immutability_count >= 1:
+                fs = min(fs + 0.02, 1.0)
+
+            # Decision trees: reward structured decision guidance
+            decision_patterns = [
+                r"\bif\b.*\bthen\b.*\belse\b",
+                r"\bwhen\s+to\s+use\b",
+                r"\bchoose\b.*\bbased\s+on\b",
+                r"(?:flowchart|decision\s+tree|checklist)",
+            ]
+            decision_count = sum(
+                1 for p in decision_patterns
+                if re.search(p, content, re.IGNORECASE)
+            )
+            if decision_count >= 2:
+                fs = min(fs + 0.03, 1.0)
+
             fs = max(0, min(1, fs))
             file_scores[rel] = {"score": round(fs, 3), "lines": len(lines), "issues": fi}
             issues.extend(f"{rel}: {i}" for i in fi)
@@ -441,13 +537,106 @@ def score_structural(gen_dir: Path) -> dict[str, Any]:
     }
 
 
-# ─── Focused Mutation (AutoResearch: single-file changes) ───────────────────
+# ─── Focused Mutation (AutoKernel Amdahl's Law Orchestration) ────────────────
+
+def _compute_file_impact(
+    rel_path: str,
+    structural_score: float,
+    traj_summary: dict,
+    evo_memory: dict,
+    recent_focus_files: set,
+) -> dict:
+    """
+    Compute Amdahl-style impact score for a genome file.
+
+    Impact = usage_weight × headroom × responsiveness_bonus × recency_factor
+
+    - usage_weight: how often this agent is actually used (from trajectories)
+    - headroom: how much room to improve (1.0 - structural_score)
+    - responsiveness_bonus: does this file respond to evolution? (from evo memory)
+    - recency_factor: penalize files that were just tried (avoid re-grinding)
+
+    Inspired by AutoKernel's orchestrate.py which uses Amdahl's law to prioritize
+    kernels by (fraction_of_total_time × improvement_potential).
+    """
+    # ── Usage weight (trajectory frequency, normalized) ──
+    # Higher = agent is used more often = changes here have more real-world impact
+    traj = traj_summary.get(rel_path, {})
+    traj_total = traj.get("total", 0)
+    traj_failures = traj.get("failure", 0) + traj.get("correction", 0)
+
+    # Normalize: max across all agents sets the scale
+    all_totals = [v.get("total", 0) for v in traj_summary.values()] if traj_summary else [0]
+    max_total = max(all_totals) if all_totals else 1
+
+    if traj_total > 0 and max_total > 0:
+        usage_weight = traj_total / max_total
+    else:
+        # No trajectory data: use a neutral weight (don't penalize, don't boost)
+        usage_weight = 0.5
+
+    # Bonus for high failure rate — these agents NEED improvement most
+    failure_rate = traj_failures / traj_total if traj_total > 0 else 0
+    failure_bonus = 1.0 + (failure_rate * 0.5)  # up to 1.5x for 100% failure rate
+
+    # ── Headroom (1.0 - score = room to improve) ──
+    headroom = max(0.05, 1.0 - structural_score)  # floor at 0.05 to avoid zero
+
+    # ── Responsiveness (from evolution memory) ──
+    file_insights = evo_memory.get("file_insights", {})
+    insight = file_insights.get(rel_path, {})
+    responsiveness = insight.get("responsiveness", 0.5)  # default neutral
+    total_attempts = insight.get("total_attempts", 0)
+
+    if total_attempts >= 4 and responsiveness == 0:
+        # File is stuck — heavy penalty, don't waste more cycles
+        responsiveness_factor = 0.1
+    elif total_attempts >= 2 and responsiveness > 0.5:
+        # File responds well — boost
+        responsiveness_factor = 1.0 + (responsiveness * 0.3)
+    elif total_attempts == 0:
+        # Never tried — neutral with slight exploration bonus
+        responsiveness_factor = 1.1
+    else:
+        responsiveness_factor = 0.5 + responsiveness
+
+    # ── Recency penalty ──
+    if rel_path in recent_focus_files:
+        recency_factor = 0.3  # heavily penalize just-tried files
+    else:
+        recency_factor = 1.0
+
+    # ── Composite impact score ──
+    impact = usage_weight * failure_bonus * headroom * responsiveness_factor * recency_factor
+
+    return {
+        "file": rel_path,
+        "impact_score": round(impact, 4),
+        "structural_score": structural_score,
+        "headroom": round(headroom, 3),
+        "usage_weight": round(usage_weight, 3),
+        "failure_bonus": round(failure_bonus, 3),
+        "failure_rate": round(failure_rate, 3),
+        "responsiveness": round(responsiveness_factor, 3),
+        "recency_factor": recency_factor,
+        "traj_total": traj_total,
+        "traj_failures": traj_failures,
+        "evo_attempts": total_attempts,
+    }
+
 
 def suggest_focus_file(gen_id: str = "initial") -> dict:
     """
-    Suggest which file to focus mutation on.
-    Picks the file with the lowest individual structural score.
-    Returns {file: str, score: float, reason: str}
+    Suggest which file to focus mutation on using Amdahl's law impact scoring.
+
+    Unlike the naive 'lowest structural score' approach, this considers:
+    - Usage frequency (trajectory data) — optimize what's used most
+    - Failure rate — prioritize agents that fail in production
+    - Structural headroom — room to improve
+    - Evolution responsiveness — skip files stuck at local optima
+    - Recency — avoid re-grinding the same file
+
+    Returns {file, score, impact_score, reason, all_ranked}
     """
     gen_dir = GENERATIONS_DIR / gen_id
     struct = score_structural(gen_dir)
@@ -456,22 +645,63 @@ def suggest_focus_file(gen_id: str = "initial") -> dict:
     if not file_scores:
         return {"file": None, "score": 0, "reason": "no files found"}
 
-    # Sort by score ascending (worst first)
-    ranked = sorted(file_scores.items(), key=lambda x: x[1]["score"])
-    worst = ranked[0]
-    rel_path = worst[0]
-    info = worst[1]
+    # Gather signals from trajectories and evolution memory
+    traj_summary = trajectories_summary()
+    evo_memory = evolution_memory_read()
 
+    # Recent focus files (last 3 results) to avoid re-grinding
+    recent_results = results_read(3)
+    recent_focus_files = {r.get("focus_file", "") for r in recent_results if r.get("focus_file")}
+
+    # Compute impact for every file
+    impact_entries = []
+    for rel_path, info in file_scores.items():
+        entry = _compute_file_impact(
+            rel_path=rel_path,
+            structural_score=info["score"],
+            traj_summary=traj_summary,
+            evo_memory=evo_memory,
+            recent_focus_files=recent_focus_files,
+        )
+        entry["issues"] = info.get("issues", [])
+        entry["lines"] = info.get("lines", 0)
+        impact_entries.append(entry)
+
+    # Sort by impact_score descending (highest impact first)
+    impact_entries.sort(key=lambda x: x["impact_score"], reverse=True)
+
+    best = impact_entries[0]
+
+    # Build reason string
     reason_parts = []
-    if info["issues"]:
-        reason_parts.append(f"issues: {', '.join(info['issues'])}")
-    reason_parts.append(f"score: {info['score']}")
+    if best["traj_total"] > 0:
+        reason_parts.append(
+            f"usage={best['usage_weight']:.0%} ({best['traj_total']} trajectories, "
+            f"{best['failure_rate']:.0%} failure rate)"
+        )
+    reason_parts.append(f"headroom={best['headroom']:.0%}")
+    if best["evo_attempts"] > 0:
+        reason_parts.append(f"responsiveness={best['responsiveness']:.2f} ({best['evo_attempts']} prior attempts)")
+    if best["recency_factor"] < 1.0:
+        reason_parts.append("recently tried (penalized)")
+    if best["issues"]:
+        reason_parts.append(f"issues: {', '.join(best['issues'][:2])}")
 
     return {
-        "file": rel_path,
-        "score": info["score"],
+        "file": best["file"],
+        "score": best["structural_score"],
+        "impact_score": best["impact_score"],
         "reason": "; ".join(reason_parts),
-        "all_ranked": [{"file": r[0], "score": r[1]["score"]} for r in ranked[:5]],
+        "all_ranked": [
+            {
+                "file": e["file"],
+                "impact": e["impact_score"],
+                "score": e["structural_score"],
+                "usage": e["usage_weight"],
+                "headroom": e["headroom"],
+            }
+            for e in impact_entries[:8]
+        ],
     }
 
 
@@ -833,6 +1063,267 @@ def auto_extract_skill(gen_id: str, score_delta: float) -> dict | None:
     )
 
 
+# ─── Evolution Memory (DeerFlow-inspired structured memory) ─────────────────
+
+def evolution_memory_read() -> dict:
+    """Read the structured evolution memory."""
+    if not EVOLUTION_MEMORY_FILE.exists():
+        return _evolution_memory_default()
+    try:
+        return json.loads(EVOLUTION_MEMORY_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, ValueError):
+        return _evolution_memory_default()
+
+
+def _evolution_memory_default() -> dict:
+    """Default empty evolution memory schema."""
+    return {
+        "version": "1.0",
+        "last_updated": None,
+        "evolution_context": {
+            "phase": "unknown",
+            "score_trend": "unknown",
+            "stalled_since": None,
+            "best_score": 0,
+            "best_gen_id": None,
+            "total_generations": 0,
+            "keep_rate": 0,
+        },
+        "file_insights": {},
+        "strategy_insights": {},
+        "facts": [],
+    }
+
+
+def evolution_memory_write(memory: dict) -> None:
+    """Write the structured evolution memory."""
+    memory["last_updated"] = now_iso()
+    EVOLUTION_MEMORY_FILE.write_text(
+        json.dumps(memory, indent=2, default=str),
+        encoding="utf-8",
+    )
+
+
+def evolution_memory_update() -> dict:
+    """
+    Rebuild structured evolution memory from results, trajectories, lessons, archive.
+    Called by cmd_retro after analysis. Returns the updated memory.
+    """
+    memory = _evolution_memory_default()
+    meta = metadata_read()
+    results = results_read()
+    lessons = lessons_read()
+    archive = archive_read()
+    traj_summary = trajectories_summary()
+
+    total = len(results)
+    kept = [r for r in results if r.get("status") == "keep"]
+    discarded = [r for r in results if r.get("status") == "discard"]
+    crashed = [r for r in results if r.get("status") == "crash"]
+    keep_rate = len(kept) / total if total > 0 else 0
+
+    # Score trend detection
+    best_scores = []
+    for r in results:
+        try:
+            best_scores.append(float(r.get("best_score", 0)))
+        except (ValueError, TypeError):
+            pass
+
+    score_trend = "unknown"
+    stalled_since = None
+    if len(best_scores) >= 3:
+        if best_scores[-1] > best_scores[0]:
+            score_trend = "improving"
+        else:
+            score_trend = "flat"
+    if len(best_scores) >= 5:
+        recent = best_scores[-3:]
+        if all(abs(a - b) < 0.001 for a, b in zip(recent, recent[1:])):
+            score_trend = "stalled"
+            # Find when it stalled
+            for i in range(len(best_scores) - 2, 0, -1):
+                if abs(best_scores[i] - best_scores[-1]) > 0.001:
+                    stalled_r = results[i] if i < len(results) else None
+                    if stalled_r:
+                        stalled_since = stalled_r.get("gen_id")
+                    break
+
+    # Phase detection from program.md
+    phase = "unknown"
+    if PROGRAM_FILE.exists():
+        prog = PROGRAM_FILE.read_text(encoding="utf-8")
+        if "Phase 1" in prog and "Phase 2" not in prog.split("Current")[0] if "Current" in prog else True:
+            phase = "Phase 1: Low-Hanging Fruit"
+        elif "Phase 2" in prog:
+            phase = "Phase 2: Prompt Quality"
+        elif "Phase 3" in prog:
+            phase = "Phase 3: Architecture"
+
+    memory["evolution_context"] = {
+        "phase": phase,
+        "score_trend": score_trend,
+        "stalled_since": stalled_since,
+        "best_score": meta.get("best_score", 0),
+        "best_gen_id": meta.get("best_gen_id"),
+        "total_generations": meta.get("total_generations", 0),
+        "keep_rate": round(keep_rate, 3),
+    }
+
+    # ── File insights ──
+    file_stats: dict[str, dict] = {}
+    for r in results:
+        f = r.get("focus_file", "")
+        if not f:
+            continue
+        file_stats.setdefault(f, {"kept": 0, "discarded": 0, "crashed": 0, "scores": []})
+        status = r.get("status", "")
+        if status == "keep":
+            file_stats[f]["kept"] += 1
+        elif status == "discard":
+            file_stats[f]["discarded"] += 1
+        elif status == "crash":
+            file_stats[f]["crashed"] += 1
+        try:
+            file_stats[f]["scores"].append(float(r.get("score", 0)))
+        except (ValueError, TypeError):
+            pass
+
+    for f, stats in file_stats.items():
+        total_f = stats["kept"] + stats["discarded"] + stats["crashed"]
+        avg_score = sum(stats["scores"]) / len(stats["scores"]) if stats["scores"] else 0
+        responsiveness = stats["kept"] / total_f if total_f > 0 else 0
+
+        # Find best strategy for this file from archive
+        file_strategies: dict[str, int] = {}
+        for e in archive:
+            if e.get("focus_file") == f and e.get("status") == "keep":
+                s = e.get("strategy", "unknown")
+                file_strategies[s] = file_strategies.get(s, 0) + 1
+        best_strategy = max(file_strategies, key=file_strategies.get) if file_strategies else None
+
+        # Find last improvement gen
+        last_improved = None
+        for e in reversed(archive):
+            if e.get("focus_file") == f and e.get("status") == "keep":
+                last_improved = e.get("gen_id")
+                break
+
+        # Collect known issues from lessons
+        known_issues = []
+        for l in lessons:
+            if l.get("focus_file") == f and l.get("outcome") == "discard":
+                lesson_text = l.get("lesson", "")
+                if len(lesson_text) > 20:
+                    known_issues.append(lesson_text[:150])
+        known_issues = known_issues[-3:]  # Keep last 3
+
+        # Trajectory health
+        traj = traj_summary.get(f, {})
+        traj_total = traj.get("total", 0)
+        traj_fails = traj.get("failure", 0) + traj.get("correction", 0)
+        failure_rate = round(traj_fails / traj_total, 2) if traj_total > 0 else 0
+
+        memory["file_insights"][f] = {
+            "responsiveness": round(responsiveness, 3),
+            "total_attempts": total_f,
+            "kept": stats["kept"],
+            "avg_score": round(avg_score, 4),
+            "best_strategy": best_strategy,
+            "last_improved_gen": last_improved,
+            "known_issues": known_issues,
+            "trajectory_failure_rate": failure_rate,
+            "trajectory_total": traj_total,
+        }
+
+    # ── Strategy insights ──
+    strategy_stats: dict[str, dict] = {}
+    for e in archive:
+        s = e.get("strategy", "unknown")
+        if s == "unknown":
+            continue
+        strategy_stats.setdefault(s, {"kept": 0, "discarded": 0, "total": 0, "scores": [], "best_on": []})
+        strategy_stats[s]["total"] += 1
+        strategy_stats[s]["scores"].append(e.get("score", 0))
+        if e.get("status") == "keep":
+            strategy_stats[s]["kept"] += 1
+            focus = e.get("focus_file", "")
+            if focus and focus not in strategy_stats[s]["best_on"]:
+                strategy_stats[s]["best_on"].append(focus)
+        elif e.get("status") == "discard":
+            strategy_stats[s]["discarded"] += 1
+
+    for s, stats in strategy_stats.items():
+        win_rate = stats["kept"] / stats["total"] if stats["total"] > 0 else 0
+        avg = sum(stats["scores"]) / len(stats["scores"]) if stats["scores"] else 0
+        memory["strategy_insights"][s] = {
+            "win_rate": round(win_rate, 3),
+            "total_attempts": stats["total"],
+            "kept": stats["kept"],
+            "avg_score": round(avg, 4),
+            "best_on": stats["best_on"][:5],
+        }
+
+    # ── Facts (extracted from high-signal patterns) ──
+    facts = []
+
+    # Fact: strategy that never wins
+    for s, stats in strategy_stats.items():
+        if stats["total"] >= 5 and stats["kept"] == 0:
+            facts.append({
+                "content": f"Strategy '{s}' has never produced a kept generation ({stats['total']} attempts)",
+                "category": "strategy",
+                "confidence": 0.95,
+                "source": "retro_analysis",
+            })
+
+    # Fact: file at local optimum
+    for f, insight in memory["file_insights"].items():
+        if insight["total_attempts"] >= 4 and insight["kept"] == 0:
+            facts.append({
+                "content": f"File '{f}' appears stuck — 0/{insight['total_attempts']} kept. May need radically different approach.",
+                "category": "file_health",
+                "confidence": 0.85,
+                "source": "retro_analysis",
+            })
+
+    # Fact: score plateau
+    if score_trend == "stalled" and stalled_since:
+        facts.append({
+            "content": f"Score has plateaued since {stalled_since}. Consider changing parent selection strategy or targeting different files.",
+            "category": "evolution",
+            "confidence": 0.9,
+            "source": "retro_analysis",
+        })
+
+    # Fact: high-failure agents from trajectories
+    for agent, counts in traj_summary.items():
+        total_a = counts.get("total", 0)
+        fails = counts.get("failure", 0) + counts.get("correction", 0)
+        if total_a >= 5 and fails / total_a > 0.4:
+            facts.append({
+                "content": f"Agent '{agent}' has {fails}/{total_a} failure rate in production — high priority for evolution.",
+                "category": "agent_health",
+                "confidence": 0.9,
+                "source": "trajectory_analysis",
+            })
+
+    # Fact: what works
+    for f, insight in memory["file_insights"].items():
+        if insight["responsiveness"] > 0.5 and insight["total_attempts"] >= 3:
+            facts.append({
+                "content": f"File '{f}' responds well to evolution ({insight['responsiveness']:.0%} keep rate, best via {insight['best_strategy']}).",
+                "category": "file_health",
+                "confidence": 0.85,
+                "source": "retro_analysis",
+            })
+
+    memory["facts"] = facts
+
+    evolution_memory_write(memory)
+    return memory
+
+
 # ─── Competition (Hive pattern: multi-agent population search) ───────────────
 
 COMPETITION_STRATEGIES = [
@@ -1009,6 +1500,9 @@ def cmd_keep(args: argparse.Namespace) -> None:
         meta["best_score"] = score
         print(f"  NEW BEST! {score:.4f} > {best_score:.4f}")
     meta["total_kept"] = meta.get("total_kept", 0) + 1
+    # Reset stuck recovery counters (codex-autoresearch PIVOT/REFINE pattern)
+    meta["consecutive_discards"] = 0
+    meta["pivot_count"] = 0
     metadata_write(meta)
 
     # Update archive entry status
@@ -1078,6 +1572,8 @@ def cmd_discard(args: argparse.Namespace) -> None:
 
     # Update metadata
     meta["total_discarded"] = meta.get("total_discarded", 0) + 1
+    # Increment stuck counter (codex-autoresearch PIVOT/REFINE pattern)
+    meta["consecutive_discards"] = meta.get("consecutive_discards", 0) + 1
     metadata_write(meta)
 
     # Update archive
@@ -1329,16 +1825,20 @@ def cmd_results(args: argparse.Namespace) -> None:
 
 
 def cmd_suggest_focus(args: argparse.Namespace) -> None:
-    """Suggest which file to focus mutation on."""
+    """Suggest which file to focus mutation on (Amdahl's law impact scoring)."""
     gen_id = args.gen_id if hasattr(args, "gen_id") and args.gen_id else "initial"
     suggestion = suggest_focus_file(gen_id)
     print(f"Focus file: {suggestion['file']}")
-    print(f"  Score: {suggestion['score']}")
+    print(f"  Impact score: {suggestion.get('impact_score', 'N/A')}")
+    print(f"  Structural score: {suggestion['score']}")
     print(f"  Reason: {suggestion['reason']}")
     if suggestion.get("all_ranked"):
-        print("\n  Top 5 candidates (worst first):")
+        print(f"\n  Top candidates (highest impact first):")
+        print(f"    {'impact':>7}  {'score':>6}  {'usage':>6}  {'headroom':>9}  file")
+        print(f"    {'-------':>7}  {'------':>6}  {'------':>6}  {'---------':>9}  ----")
         for r in suggestion["all_ranked"]:
-            print(f"    {r['score']:.3f}  {r['file']}")
+            print(f"    {r.get('impact', 0):>7.4f}  {r['score']:>6.3f}  "
+                  f"{r.get('usage', 0):>5.0%}  {r.get('headroom', 0):>8.0%}  {r['file']}")
 
 
 def cmd_lineage(args: argparse.Namespace) -> None:
@@ -1535,6 +2035,648 @@ def cmd_competition(_args: argparse.Namespace) -> None:
         print(f"    - {s['name']}: {s['directive'][:70]}...")
 
 
+# ─── Retrospective (Agentic Researcher pattern: structured self-review) ────
+
+def cmd_retro(args: argparse.Namespace) -> None:
+    """
+    Automated retrospective: analyze evolution history and update program.md.
+    Inspired by The Agentic Researcher's /retro command.
+    """
+    meta = metadata_read()
+    if not meta:
+        print("Not initialized. Run: python ua.py init")
+        return
+
+    results = results_read()
+    lessons = lessons_read()
+    trajectories = trajectories_read()
+    archive = archive_read()
+    skills = skills_ranked()
+
+    if len(results) < 2:
+        print("Need at least 2 experiments for a retrospective.")
+        return
+
+    # ── Gather statistics ──
+    total = len(results)
+    kept = [r for r in results if r.get("status") == "keep"]
+    discarded = [r for r in results if r.get("status") == "discard"]
+    crashed = [r for r in results if r.get("status") == "crash"]
+    keep_rate = len(kept) / total if total > 0 else 0
+
+    # Per-file analysis
+    file_stats: dict[str, dict] = {}
+    for r in results:
+        f = r.get("focus_file", "")
+        if not f:
+            continue
+        file_stats.setdefault(f, {"kept": 0, "discarded": 0, "crashed": 0, "scores": []})
+        status = r.get("status", "")
+        if status == "keep":
+            file_stats[f]["kept"] += 1
+        elif status == "discard":
+            file_stats[f]["discarded"] += 1
+        elif status == "crash":
+            file_stats[f]["crashed"] += 1
+        try:
+            file_stats[f]["scores"].append(float(r.get("score", 0)))
+        except (ValueError, TypeError):
+            pass
+
+    # Per-strategy analysis (from archive)
+    strategy_stats: dict[str, dict] = {}
+    for e in archive:
+        s = e.get("strategy", "unknown")
+        strategy_stats.setdefault(s, {"kept": 0, "discarded": 0, "total": 0, "scores": []})
+        strategy_stats[s]["total"] += 1
+        if e.get("status") == "keep":
+            strategy_stats[s]["kept"] += 1
+        elif e.get("status") == "discard":
+            strategy_stats[s]["discarded"] += 1
+        strategy_stats[s]["scores"].append(e.get("score", 0))
+
+    # Trajectory analysis
+    traj_summary = trajectories_summary()
+
+    # Score progression
+    scores = []
+    for r in results:
+        try:
+            scores.append(float(r.get("score", 0)))
+        except (ValueError, TypeError):
+            pass
+    best_scores = []
+    for r in results:
+        try:
+            best_scores.append(float(r.get("best_score", 0)))
+        except (ValueError, TypeError):
+            pass
+
+    score_trend = "improving" if len(best_scores) >= 3 and best_scores[-1] > best_scores[0] else "flat"
+    if len(best_scores) >= 5:
+        recent = best_scores[-3:]
+        if all(a == b for a, b in zip(recent, recent[1:])):
+            score_trend = "stalled"
+
+    # ── Build report ──
+    report_lines = [
+        f"# Retrospective Report",
+        f"",
+        f"**Generated:** {now_iso()[:19]}",
+        f"**Generations analyzed:** {total}",
+        f"**Best score:** {meta.get('best_score', 0):.4f} ({meta.get('best_gen_id', 'N/A')})",
+        f"**Score trend:** {score_trend}",
+        f"",
+        f"## Overview",
+        f"",
+        f"| Metric | Value |",
+        f"|--------|-------|",
+        f"| Total experiments | {total} |",
+        f"| Kept | {len(kept)} ({keep_rate:.0%}) |",
+        f"| Discarded | {len(discarded)} |",
+        f"| Crashed | {len(crashed)} |",
+        f"| Best score | {meta.get('best_score', 0):.4f} |",
+        f"| Score trend | {score_trend} |",
+        f"",
+    ]
+
+    # File performance
+    report_lines.extend([
+        f"## File Performance",
+        f"",
+        f"| File | Kept | Discarded | Crashed | Avg Score | Trend |",
+        f"|------|------|-----------|---------|-----------|-------|",
+    ])
+    for f, stats in sorted(file_stats.items(), key=lambda x: x[1]["kept"], reverse=True):
+        avg_score = sum(stats["scores"]) / len(stats["scores"]) if stats["scores"] else 0
+        total_f = stats["kept"] + stats["discarded"] + stats["crashed"]
+        success_rate = stats["kept"] / total_f if total_f > 0 else 0
+        trend = "good" if success_rate > 0.5 else ("struggling" if success_rate < 0.2 else "mixed")
+        report_lines.append(
+            f"| `{f}` | {stats['kept']} | {stats['discarded']} | {stats['crashed']} | {avg_score:.3f} | {trend} |"
+        )
+    report_lines.append("")
+
+    # Strategy performance
+    if any(s != "unknown" for s in strategy_stats):
+        report_lines.extend([
+            f"## Strategy Performance",
+            f"",
+            f"| Strategy | Total | Kept | Win Rate | Avg Score |",
+            f"|----------|-------|------|----------|-----------|",
+        ])
+        for s, stats in sorted(strategy_stats.items(), key=lambda x: x[1]["kept"], reverse=True):
+            if s == "unknown":
+                continue
+            avg = sum(stats["scores"]) / len(stats["scores"]) if stats["scores"] else 0
+            win_rate = stats["kept"] / stats["total"] if stats["total"] > 0 else 0
+            report_lines.append(
+                f"| {s} | {stats['total']} | {stats['kept']} | {win_rate:.0%} | {avg:.3f} |"
+            )
+        report_lines.append("")
+
+    # Agent trajectory health
+    if traj_summary:
+        report_lines.extend([
+            f"## Agent Health (from trajectories)",
+            f"",
+            f"| Agent | Total | Failures | Failure Rate | Status |",
+            f"|-------|-------|----------|--------------|--------|",
+        ])
+        for agent, counts in sorted(traj_summary.items(), key=lambda x: x[1].get("total", 0), reverse=True):
+            total_a = counts.get("total", 0)
+            fails = counts.get("failure", 0) + counts.get("correction", 0)
+            rate = fails / total_a if total_a > 0 else 0
+            status = "healthy" if rate < 0.15 else ("needs attention" if rate < 0.35 else "critical")
+            report_lines.append(
+                f"| `{agent}` | {total_a} | {fails} | {rate:.0%} | {status} |"
+            )
+        report_lines.append("")
+
+    # Insights & recommendations
+    report_lines.extend([
+        f"## Insights",
+        f"",
+    ])
+
+    # Detect patterns
+    insights = []
+
+    # Stalled score
+    if score_trend == "stalled":
+        insights.append(
+            "- **Score stalled**: Last 3 best scores identical. Consider: "
+            "switch parent selection strategy (try `ucb1` or `novelty`), "
+            "evolve a different file category, or update program.md priorities."
+        )
+
+    # High crash rate
+    crash_rate = len(crashed) / total if total > 0 else 0
+    if crash_rate > 0.3:
+        insights.append(
+            f"- **High crash rate ({crash_rate:.0%})**: MetaAgent is producing broken output. "
+            f"Check meta_prompt.md for clarity on file write instructions."
+        )
+
+    # Strategy saturation
+    for s, stats in strategy_stats.items():
+        if s == "unknown":
+            continue
+        if stats["total"] >= 5 and stats["kept"] == 0:
+            insights.append(
+                f"- **Strategy `{s}` never wins**: {stats['total']} attempts, 0 kept. "
+                f"Consider removing or replacing this competition strategy."
+            )
+
+    # File that always fails
+    for f, stats in file_stats.items():
+        total_f = stats["kept"] + stats["discarded"] + stats["crashed"]
+        if total_f >= 3 and stats["kept"] == 0:
+            insights.append(
+                f"- **`{f}` always fails**: {total_f} attempts, 0 kept. "
+                f"File may be at local optimum or changes are too subtle to score higher."
+            )
+
+    # Agents needing evolution (from trajectories)
+    for agent, counts in traj_summary.items():
+        total_a = counts.get("total", 0)
+        fails = counts.get("failure", 0) + counts.get("correction", 0)
+        if total_a >= 5 and fails / total_a > 0.35:
+            insights.append(
+                f"- **Agent `{agent}` high failure rate ({fails}/{total_a})**: "
+                f"Queue evolve with `ua.py queue-evolve {agent}`."
+            )
+
+    # Low keep rate
+    if keep_rate < 0.15 and total >= 10:
+        insights.append(
+            f"- **Low keep rate ({keep_rate:.0%})**: Most generations are discarded. "
+            f"The search space may be too constrained or evaluation too strict."
+        )
+
+    if not insights:
+        insights.append("- No critical issues detected. Evolution is progressing normally.")
+
+    report_lines.extend(insights)
+    report_lines.append("")
+
+    # Program.md update recommendations
+    report_lines.extend([
+        f"## Recommended program.md Updates",
+        f"",
+    ])
+
+    # Build "What Works" and "What Doesn't" from lessons
+    what_works = [l for l in lessons if l.get("outcome") == "keep"]
+    what_fails = [l for l in lessons if l.get("outcome") == "discard"]
+
+    if what_works:
+        report_lines.append("### What Works")
+        for l in what_works[-5:]:
+            report_lines.append(f"- `{l.get('gen_id', '?')}` on `{l.get('focus_file', '?')}`: {l.get('lesson', '')[:120]}")
+        report_lines.append("")
+
+    if what_fails:
+        report_lines.append("### What Doesn't Work")
+        for l in what_fails[-5:]:
+            report_lines.append(f"- `{l.get('gen_id', '?')}` on `{l.get('focus_file', '?')}`: {l.get('lesson', '')[:120]}")
+        report_lines.append("")
+
+    report_content = "\n".join(report_lines)
+
+    # ── Save report ──
+    RETRO_DIR.mkdir(parents=True, exist_ok=True)
+    retro_num = len(list(RETRO_DIR.glob("retro_*.md"))) + 1
+    report_file = RETRO_DIR / f"retro_{retro_num:03d}.md"
+    report_file.write_text(report_content, encoding="utf-8")
+    print(f"Retrospective saved: {report_file}")
+
+    # ── Update structured evolution memory ──
+    evo_mem = evolution_memory_update()
+    facts_count = len(evo_mem.get("facts", []))
+    files_count = len(evo_mem.get("file_insights", {}))
+    print(f"Evolution memory updated: {files_count} file insights, {facts_count} facts")
+
+    # ── Auto-update program.md ──
+    if PROGRAM_FILE.exists():
+        prog_content = PROGRAM_FILE.read_text(encoding="utf-8")
+
+        # Build What Works section
+        works_lines = []
+        for f, stats in sorted(file_stats.items(), key=lambda x: x[1]["kept"], reverse=True):
+            total_f = stats["kept"] + stats["discarded"] + stats["crashed"]
+            if stats["kept"] > 0 and total_f >= 2:
+                rate = stats["kept"] / total_f
+                works_lines.append(f"- `{f}`: {stats['kept']}/{total_f} kept ({rate:.0%} success rate)")
+
+        fails_lines = []
+        for f, stats in sorted(file_stats.items(), key=lambda x: x[1].get("discarded", 0) + x[1].get("crashed", 0), reverse=True):
+            total_f = stats["kept"] + stats["discarded"] + stats["crashed"]
+            if stats["kept"] == 0 and total_f >= 2:
+                fails_lines.append(f"- `{f}`: 0/{total_f} kept — consider deprioritizing or trying radically different approach")
+
+        # Insert/update What Works section
+        what_works_marker = "## What Works"
+        what_fails_marker = "## What Doesn't Work"
+        lessons_marker = "## Lessons Learned"
+
+        new_sections = ""
+        if works_lines:
+            new_sections += f"\n{what_works_marker}\n\n_Auto-generated by retro (retro #{retro_num})_\n\n" + "\n".join(works_lines) + "\n"
+        if fails_lines:
+            new_sections += f"\n{what_fails_marker}\n\n_Auto-generated by retro (retro #{retro_num})_\n\n" + "\n".join(fails_lines) + "\n"
+
+        # Place before Lessons Learned or at end
+        if what_works_marker in prog_content:
+            # Remove old What Works and What Doesn't sections
+            clean = prog_content
+            for marker in [what_works_marker, what_fails_marker]:
+                if marker in clean:
+                    idx = clean.index(marker)
+                    rest = clean[idx + len(marker):]
+                    next_h2 = rest.find("\n## ")
+                    if next_h2 == -1:
+                        clean = clean[:idx]
+                    else:
+                        clean = clean[:idx] + rest[next_h2:]
+            prog_content = clean
+
+        if new_sections:
+            if lessons_marker in prog_content:
+                idx = prog_content.index(lessons_marker)
+                prog_content = prog_content[:idx] + new_sections.strip() + "\n\n" + prog_content[idx:]
+            else:
+                prog_content = prog_content.rstrip() + "\n" + new_sections
+
+        # Update score trend in a summary line
+        trend_marker = "## Evolution Status"
+        trend_content = (
+            f"\n{trend_marker}\n\n"
+            f"_Auto-updated by retro #{retro_num} ({now_iso()[:10]})_\n\n"
+            f"- Best: {meta.get('best_score', 0):.4f} ({meta.get('best_gen_id', 'N/A')})\n"
+            f"- Keep rate: {keep_rate:.0%} ({len(kept)}/{total})\n"
+            f"- Trend: {score_trend}\n"
+            f"- Crash rate: {crash_rate:.0%}\n"
+        )
+        if trend_marker in prog_content:
+            idx = prog_content.index(trend_marker)
+            rest = prog_content[idx + len(trend_marker):]
+            next_h2 = rest.find("\n## ")
+            if next_h2 == -1:
+                prog_content = prog_content[:idx] + trend_content.strip() + "\n"
+            else:
+                prog_content = prog_content[:idx] + trend_content.strip() + "\n" + rest[next_h2:]
+        else:
+            # Insert at top, after the first blockquote
+            first_h2 = prog_content.find("\n## ")
+            if first_h2 != -1:
+                prog_content = prog_content[:first_h2] + "\n" + trend_content + prog_content[first_h2:]
+            else:
+                prog_content = trend_content + "\n" + prog_content
+
+        PROGRAM_FILE.write_text(prog_content, encoding="utf-8")
+        print(f"program.md updated with evolution status + what works/doesn't")
+
+    # ── Print summary ──
+    print(f"\n=== Retrospective #{retro_num} ===")
+    print(f"  Experiments: {total} (kept={len(kept)}, discarded={len(discarded)}, crashed={len(crashed)})")
+    print(f"  Keep rate: {keep_rate:.0%}")
+    print(f"  Score trend: {score_trend}")
+    print(f"  Best: {meta.get('best_score', 0):.4f}")
+    if insights:
+        print(f"\n  Key insights:")
+        for i in insights:
+            print(f"    {i}")
+
+
+def cmd_memory(_args: argparse.Namespace) -> None:
+    """Show structured evolution memory."""
+    mem = evolution_memory_read()
+    if not mem.get("last_updated"):
+        print("No evolution memory yet. Run: /ultragent retro")
+        return
+
+    ctx = mem["evolution_context"]
+    print("=== Evolution Memory ===")
+    print(f"  Last updated: {mem['last_updated'][:19]}")
+    print(f"  Phase: {ctx['phase']}")
+    print(f"  Score trend: {ctx['score_trend']}")
+    print(f"  Best: {ctx['best_score']:.4f} ({ctx['best_gen_id']})")
+    print(f"  Keep rate: {ctx['keep_rate']:.0%}")
+
+    fi = mem.get("file_insights", {})
+    if fi:
+        print(f"\n  File Insights ({len(fi)} files):")
+        for f, insight in sorted(fi.items(), key=lambda x: x[1].get("responsiveness", 0), reverse=True):
+            status = "good" if insight["responsiveness"] > 0.4 else ("stuck" if insight["responsiveness"] == 0 and insight["total_attempts"] >= 3 else "mixed")
+            print(f"    {f:<40s}  {insight['responsiveness']:.0%} keep  {insight['total_attempts']} attempts  [{status}]"
+                  + (f"  best:{insight['best_strategy']}" if insight.get("best_strategy") else ""))
+
+    si = mem.get("strategy_insights", {})
+    if si:
+        print(f"\n  Strategy Insights ({len(si)} strategies):")
+        for s, insight in sorted(si.items(), key=lambda x: x[1].get("win_rate", 0), reverse=True):
+            print(f"    {s:<20s}  {insight['win_rate']:.0%} win  {insight['total_attempts']} attempts")
+
+    facts = mem.get("facts", [])
+    if facts:
+        print(f"\n  Facts ({len(facts)}):")
+        for fact in facts:
+            conf = fact.get("confidence", 0)
+            cat = fact.get("category", "?")
+            print(f"    [{cat}] ({conf:.0%}) {fact['content'][:90]}")
+
+
+# ─── Stuck Recovery (codex-autoresearch PIVOT/REFINE pattern) ──────────────
+
+REFINE_THRESHOLD = 3   # consecutive discards before REFINE
+PIVOT_THRESHOLD = 5    # consecutive discards before PIVOT
+ESCALATE_THRESHOLD = 2 # PIVOTs without improvement before ESCALATE
+SOFT_BLOCKER_THRESHOLD = 3  # PIVOTs without improvement before soft blocker
+
+
+def check_stuck_recovery() -> dict:
+    """
+    Check if the evolution loop is stuck and recommend an action.
+    Returns: {action, consecutive_discards, pivot_count, reason, recommendation}
+
+    Actions:
+      - "continue": no intervention needed
+      - "refine": adjust within current strategy (switch focus file)
+      - "pivot": abandon strategy (change parent selection, different file category)
+      - "escalate": radical change (rotate competition strategies, update program.md)
+      - "soft_blocker": warn and attempt self-referential changes
+    """
+    meta = metadata_read()
+    consec = meta.get("consecutive_discards", 0)
+    pivots = meta.get("pivot_count", 0)
+
+    result = {
+        "action": "continue",
+        "consecutive_discards": consec,
+        "pivot_count": pivots,
+        "reason": "",
+        "recommendation": "",
+    }
+
+    if pivots >= SOFT_BLOCKER_THRESHOLD:
+        result["action"] = "soft_blocker"
+        result["reason"] = f"{pivots} PIVOTs without improvement"
+        result["recommendation"] = (
+            "Evolution may be stuck at a local optimum. "
+            "Try self-referential changes (meta_prompt.md, select_parent.py) "
+            "or radically different file targets."
+        )
+    elif pivots >= ESCALATE_THRESHOLD:
+        result["action"] = "escalate"
+        result["reason"] = f"{pivots} PIVOTs without improvement"
+        result["recommendation"] = (
+            "Rotate competition strategies. Update program.md with dead-end lessons. "
+            "Consider targeting a completely different file category."
+        )
+    elif consec >= PIVOT_THRESHOLD:
+        result["action"] = "pivot"
+        result["reason"] = f"{consec} consecutive discards"
+        result["recommendation"] = (
+            "Abandon current approach. Change parent selection strategy "
+            "(try ucb1 or novelty). Target a fundamentally different file."
+        )
+    elif consec >= REFINE_THRESHOLD:
+        result["action"] = "refine"
+        result["reason"] = f"{consec} consecutive discards"
+        result["recommendation"] = (
+            "Adjust within current strategy. Switch to next-worst focus file. "
+            "Try a different competition strategy for the same file."
+        )
+
+    return result
+
+
+def apply_refine() -> dict:
+    """Apply REFINE: switch focus file to next candidate, log the event."""
+    meta = metadata_read()
+
+    # Get current best gen for suggest-focus
+    best_gen = meta.get("best_gen_id", "initial")
+    suggestion = suggest_focus_file(best_gen)
+    all_ranked = suggestion.get("all_ranked", [])
+
+    # Try to pick a DIFFERENT file than the most recent focus
+    results = results_read(5)
+    recent_files = {r.get("focus_file", "") for r in results if r.get("focus_file")}
+
+    new_focus = None
+    for candidate in all_ranked:
+        if candidate["file"] not in recent_files:
+            new_focus = candidate["file"]
+            break
+
+    if not new_focus and len(all_ranked) > 1:
+        new_focus = all_ranked[1]["file"]  # Second-worst if all recently tried
+
+    # Log the refine event
+    results_log({
+        "timestamp": now_iso(),
+        "gen_id": "-",
+        "parent_id": "",
+        "status": "refine",
+        "score": "",
+        "best_score": f"{meta.get('best_score', 0):.4f}",
+        "focus_file": new_focus or "",
+        "files_changed": "0",
+        "duration_s": "0",
+        "description": f"[REFINE] {meta.get('consecutive_discards', 0)} consecutive discards. Switching focus to {new_focus}",
+    })
+
+    # Reset consecutive_discards but keep pivot_count
+    meta["consecutive_discards"] = 0
+    metadata_write(meta)
+
+    # Record lesson
+    lesson_record(
+        gen_id="-", focus_file=new_focus or "",
+        outcome="refine", strategy="refine",
+        lesson=f"REFINE after {meta.get('consecutive_discards', 0)} discards. "
+               f"Recent files tried: {', '.join(recent_files)}. Now targeting: {new_focus}",
+    )
+
+    return {
+        "action": "refine",
+        "new_focus": new_focus,
+        "recent_files": list(recent_files),
+    }
+
+
+def apply_pivot() -> dict:
+    """Apply PIVOT: change parent selection strategy, log the event."""
+    meta = metadata_read()
+    cfg = config_read()
+
+    # Rotate parent selection strategy
+    strategies = ["score_child_prop", "ucb1", "novelty", "best", "random"]
+    current = cfg.get("parent_selection_strategy", "score_child_prop")
+    current_idx = strategies.index(current) if current in strategies else 0
+    new_strategy = strategies[(current_idx + 1) % len(strategies)]
+
+    # Update config with new strategy
+    cfg["parent_selection_strategy"] = new_strategy
+    config_write(cfg)
+
+    # Increment pivot_count
+    meta["pivot_count"] = meta.get("pivot_count", 0) + 1
+    meta["consecutive_discards"] = 0
+    metadata_write(meta)
+
+    # Log the pivot event
+    results_log({
+        "timestamp": now_iso(),
+        "gen_id": "-",
+        "parent_id": "",
+        "status": "pivot",
+        "score": "",
+        "best_score": f"{meta.get('best_score', 0):.4f}",
+        "focus_file": "",
+        "files_changed": "0",
+        "duration_s": "0",
+        "description": f"[PIVOT] Abandoned strategy '{current}'. Now using '{new_strategy}'. "
+                       f"Pivot #{meta.get('pivot_count', 1)}",
+    })
+
+    # Record lesson
+    lesson_record(
+        gen_id="-", focus_file="",
+        outcome="pivot", strategy=current,
+        lesson=f"PIVOT #{meta.get('pivot_count', 1)}: abandoned '{current}' after "
+               f"{meta.get('total_discarded', 0)} total discards. Switching to '{new_strategy}'.",
+    )
+
+    return {
+        "action": "pivot",
+        "old_strategy": current,
+        "new_strategy": new_strategy,
+        "pivot_count": meta.get("pivot_count", 1),
+    }
+
+
+def cmd_stuck_check(_args: argparse.Namespace) -> None:
+    """Check if the evolution loop is stuck and recommend action."""
+    result = check_stuck_recovery()
+
+    action = result["action"]
+    consec = result["consecutive_discards"]
+    pivots = result["pivot_count"]
+
+    if action == "continue":
+        print(f"=== Stuck Check: OK ===")
+        print(f"  Consecutive discards: {consec} (threshold: {REFINE_THRESHOLD})")
+        print(f"  Pivot count: {pivots}")
+        print(f"  No intervention needed.")
+    else:
+        markers = {"refine": "REFINE", "pivot": "PIVOT", "escalate": "ESCALATE", "soft_blocker": "SOFT BLOCKER"}
+        print(f"=== Stuck Check: {markers.get(action, action.upper())} ===")
+        print(f"  Consecutive discards: {consec}")
+        print(f"  Pivot count: {pivots}")
+        print(f"  Reason: {result['reason']}")
+        print(f"  Recommendation: {result['recommendation']}")
+
+        if action == "refine":
+            print(f"\n  To apply: the evolve loop will auto-REFINE at the next cycle.")
+        elif action == "pivot":
+            print(f"\n  To apply: the evolve loop will auto-PIVOT at the next cycle.")
+
+
+# ─── Protocol Fingerprint Check (codex-autoresearch Re-Anchoring) ──────────
+
+FINGERPRINT_ITEMS = [
+    "MetaAgent has 12-tool-call hard limit (aim for 4-6)",
+    "Smoke test runs BEFORE LLM-Judge (Step 5b before Step 6)",
+    "Keep/discard is binary: score > best = keep, else = discard",
+    "Competition mode: 3 parallel agents (simplifier, exemplifier, aligner)",
+    "Focus file is PRE-LOADED in MetaAgent context (never re-read)",
+    "Stuck recovery: 3 discards = REFINE, 5 = PIVOT (Step 8b)",
+    "Ensemble evaluation: 3 independent judge agents, majority vote",
+    "Sprint contract is MANDATORY before MetaAgent edits",
+    "ONE file per generation (focused mutation)",
+    "Results logged to results.tsv for EVERY generation",
+]
+
+FINGERPRINT_INTERVAL_DEFAULT = 10
+FINGERPRINT_INTERVAL_COMPACT_1 = 5
+FINGERPRINT_INTERVAL_COMPACT_2 = 1
+
+
+def should_fingerprint_check(generation_number: int, compaction_count: int = 0) -> bool:
+    """Determine if a fingerprint check should run at this generation."""
+    if compaction_count >= 2:
+        return True  # Every generation after 2+ compactions
+    elif compaction_count == 1:
+        return generation_number % FINGERPRINT_INTERVAL_COMPACT_1 == 0
+    else:
+        return generation_number % FINGERPRINT_INTERVAL_DEFAULT == 0
+
+
+def cmd_fingerprint(_args: argparse.Namespace) -> None:
+    """Print the Protocol Fingerprint Check items for re-anchoring."""
+    meta = metadata_read()
+    gen_num = meta.get("next_gen_number", 1) - 1
+
+    print("=== Protocol Fingerprint Check ===")
+    print(f"  Current generation: {gen_num}")
+    print(f"  Files to re-read on failure:")
+    print(f"    - {ULTRAGENT_DIR / 'skill' / 'SKILL.md'}")
+    print(f"    - {ULTRAGENT_DIR / 'meta_prompt.md'}")
+    print(f"    - {ULTRAGENT_DIR / 'program.md'}")
+    print(f"\n  Verify these 10 items (all must be YES):\n")
+    for i, item in enumerate(FINGERPRINT_ITEMS, 1):
+        print(f"    {i:2d}. {item}")
+    print(f"\n  If ANY item is uncertain: re-read the files above,")
+    print(f"  tag next generation with [RE-ANCHOR].")
+    print(f"\n  Check intervals:")
+    print(f"    Default: every {FINGERPRINT_INTERVAL_DEFAULT} generations")
+    print(f"    After 1 compaction: every {FINGERPRINT_INTERVAL_COMPACT_1} generations")
+    print(f"    After 2+ compactions: every generation")
+
+
 # ─── CLI ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1611,6 +2753,10 @@ def main():
     ls = sub.add_parser("lessons", help="Show lessons learned")
     ls.add_argument("focus_file", nargs="?", help="Filter by file")
     sub.add_parser("competition", help="Show competition config")
+    sub.add_parser("retro", help="Run retrospective analysis")
+    sub.add_parser("memory", help="Show structured evolution memory")
+    sub.add_parser("stuck-check", help="Check stuck recovery status")
+    sub.add_parser("fingerprint", help="Protocol fingerprint check items")
 
     args = parser.parse_args()
 
@@ -1628,6 +2774,10 @@ def main():
         "queue-evolve": cmd_queue_evolve, "pending-evolves": cmd_pending_evolves,
         "drain-queue": cmd_drain_queue,
         "skills": cmd_skills, "lessons": cmd_lessons, "competition": cmd_competition,
+        "retro": cmd_retro,
+        "memory": cmd_memory,
+        "stuck-check": cmd_stuck_check,
+        "fingerprint": cmd_fingerprint,
     }
 
     if args.command in commands:

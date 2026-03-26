@@ -111,6 +111,100 @@ def eval_structural(gen_id: str) -> dict:
             if examples > 0:
                 file_score = min(file_score + 0.05, 1.0)
 
+            # ── Commandment-based quality checks ──
+            # Anti-genie: penalize patterns that invite shortcut behavior
+            antigenie_patterns = [
+                r"\b(?:ts-ignore|@ts-ignore|eslint-disable)\b",
+                r"\bskip\s+(?:test|check|validation)\b",
+                r"\bignore\s+(?:error|warning|failure)\b",
+                r"\bany\b\s*(?:type|cast)\b",
+            ]
+            antigenie_count = sum(
+                len(re.findall(p, content, re.IGNORECASE))
+                for p in antigenie_patterns
+            )
+            if antigenie_count > 0:
+                file_issues.append(f"anti-genie violation: {antigenie_count} shortcut patterns")
+                file_score -= 0.15 * min(antigenie_count, 3)
+
+            # Verification-first: reward explicit verification/testing references
+            verification_patterns = [
+                r"\bverif(?:y|ied|ication)\b",
+                r"\bvalidat(?:e|ion|ed)\b",
+                r"\btest(?:ing|s|ed)?\b.*\bbefore\b",
+                r"\bcheck\b.*\bbefore\b(?:.*\b(?:commit|push|deploy|claim)\b)",
+                r"\bevidence\b",
+            ]
+            verification_count = sum(
+                1 for p in verification_patterns
+                if re.search(p, content, re.IGNORECASE)
+            )
+            if verification_count >= 3:
+                file_score = min(file_score + 0.08, 1.0)
+            elif verification_count >= 1:
+                file_score = min(file_score + 0.03, 1.0)
+
+            # Error recovery: reward explicit "when X fails, do Y" patterns
+            recovery_patterns = [
+                r"\bwhen\b.*\bfail",
+                r"\bif\b.*\berror\b.*\bthen\b",
+                r"\bfallback\b",
+                r"\brecover(?:y|ing)?\b",
+                r"\bretry\b.*\bstrateg",
+                r"\bon\s+failure\b",
+            ]
+            recovery_count = sum(
+                1 for p in recovery_patterns
+                if re.search(p, content, re.IGNORECASE)
+            )
+            if recovery_count >= 2:
+                file_score = min(file_score + 0.05, 1.0)
+
+            # Promise inflation: penalize overclaiming without evidence
+            overclaim_patterns = [
+                r"\balways\s+(?:ensures?|guarantees?|works?)\b",
+                r"\bnever\s+fails?\b",
+                r"\bperfect(?:ly)?\s+(?:handles?|solves?)\b",
+                r"\b100%\s+(?:accurate|reliable|safe)\b",
+            ]
+            overclaim_count = sum(
+                len(re.findall(p, content, re.IGNORECASE))
+                for p in overclaim_patterns
+            )
+            if overclaim_count > 2:
+                file_issues.append(f"promise inflation ({overclaim_count} overclaims)")
+                file_score -= 0.05
+
+            # Immutability awareness: reward mentioning immutable patterns
+            immutability_patterns = [
+                r"\bimmutab(?:le|ility)\b",
+                r"\bnew\s+object\b",
+                r"\bspread\s+operator\b",
+                r"\bdon'?t\s+mutat",
+                r"\bnever\s+mutat",
+                r"\bpure\s+function",
+            ]
+            immutability_count = sum(
+                1 for p in immutability_patterns
+                if re.search(p, content, re.IGNORECASE)
+            )
+            if immutability_count >= 1:
+                file_score = min(file_score + 0.02, 1.0)
+
+            # Decision trees: reward structured decision guidance
+            decision_patterns = [
+                r"\bif\b.*\bthen\b.*\belse\b",
+                r"\bwhen\s+to\s+use\b",
+                r"\bchoose\b.*\bbased\s+on\b",
+                r"(?:flowchart|decision\s+tree|checklist)",
+            ]
+            decision_count = sum(
+                1 for p in decision_patterns
+                if re.search(p, content, re.IGNORECASE)
+            )
+            if decision_count >= 2:
+                file_score = min(file_score + 0.03, 1.0)
+
             file_score = max(0, min(1, file_score))
             results["files"][rel] = {
                 "lines": len(lines),
@@ -155,6 +249,130 @@ def eval_structural(gen_id: str) -> dict:
     }
 
     return results
+
+
+# ─── Smoke Test (Agentic Researcher pattern: Tier 1 crash check) ──────────
+
+def eval_smoke_test(gen_id: str) -> dict:
+    """
+    Quick sanity check before expensive LLM-Judge evaluation.
+    Catches obviously broken candidates: empty files, drastic truncation,
+    destroyed structure, introduced syntax issues.
+
+    Returns:
+        {"passed": bool, "issues": [...], "warnings": [...]}
+
+    A generation that fails the smoke test should be DISCARDED immediately
+    without wasting an LLM-Judge call.
+    """
+    gen_dir = GENERATIONS_DIR / gen_id
+    snapshot_dir = gen_dir / "snapshot"
+    issues = []
+    warnings = []
+
+    if not snapshot_dir.exists():
+        return {"passed": False, "issues": ["snapshot directory missing"], "warnings": []}
+
+    # Get parent for comparison
+    meta_file = gen_dir / "metadata.json"
+    parent_id = None
+    if meta_file.exists():
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        parent_id = meta.get("parent_gen_id")
+
+    parent_snapshot = GENERATIONS_DIR / parent_id / "snapshot" if parent_id else None
+
+    for root, _dirs, files in os.walk(snapshot_dir):
+        for fname in files:
+            if not fname.endswith(".md"):
+                continue
+
+            fpath = Path(root) / fname
+            rel = fpath.relative_to(snapshot_dir).as_posix()
+            content = fpath.read_text(encoding="utf-8", errors="replace")
+            lines = content.split("\n")
+
+            # ── Fatal checks (instant discard) ──
+
+            # Empty or near-empty file
+            if len(content.strip()) < 20:
+                issues.append(f"{rel}: file is empty or near-empty ({len(content)} chars)")
+                continue
+
+            # File is just whitespace/newlines
+            if not content.strip():
+                issues.append(f"{rel}: file contains only whitespace")
+                continue
+
+            # ── Parent comparison checks ──
+            if parent_snapshot and parent_snapshot.exists():
+                parent_file = parent_snapshot / rel
+                if parent_file.exists():
+                    parent_content = parent_file.read_text(encoding="utf-8", errors="replace")
+                    parent_lines = parent_content.split("\n")
+
+                    # Drastic truncation: lost >60% of content
+                    if len(parent_lines) > 10:
+                        ratio = len(lines) / len(parent_lines)
+                        if ratio < 0.4:
+                            issues.append(
+                                f"{rel}: drastic truncation ({len(parent_lines)} -> {len(lines)} lines, "
+                                f"{ratio:.0%} of original)"
+                            )
+                        elif ratio < 0.6:
+                            warnings.append(
+                                f"{rel}: significant reduction ({len(parent_lines)} -> {len(lines)} lines)"
+                            )
+
+                    # Content completely replaced (less than 10% overlap)
+                    if len(parent_lines) > 20 and len(lines) > 20:
+                        parent_set = set(l.strip() for l in parent_lines if l.strip())
+                        child_set = set(l.strip() for l in lines if l.strip())
+                        if parent_set:
+                            overlap = len(parent_set & child_set) / len(parent_set)
+                            if overlap < 0.10:
+                                issues.append(
+                                    f"{rel}: content completely replaced "
+                                    f"({overlap:.0%} overlap with parent)"
+                                )
+                            elif overlap < 0.25:
+                                warnings.append(
+                                    f"{rel}: major rewrite ({overlap:.0%} overlap with parent)"
+                                )
+
+            # ── Structural integrity checks ──
+
+            # Lost all markdown structure
+            has_any_heading = bool(re.search(r"^#+\s+", content, re.MULTILINE))
+            if not has_any_heading and len(lines) > 10:
+                issues.append(f"{rel}: no markdown headings found in {len(lines)}-line file")
+
+            # Unclosed code blocks (odd number of ```)
+            fence_count = content.count("```")
+            if fence_count % 2 != 0:
+                warnings.append(f"{rel}: unclosed code fence ({fence_count} markers)")
+
+            # Corrupted content: high ratio of non-printable characters
+            printable = sum(1 for c in content if c.isprintable() or c in '\n\r\t')
+            if len(content) > 0:
+                printable_ratio = printable / len(content)
+                if printable_ratio < 0.9:
+                    issues.append(
+                        f"{rel}: possibly corrupted ({printable_ratio:.0%} printable)"
+                    )
+
+            # Extreme bloat: more than 3x parent size
+            if parent_snapshot and parent_snapshot.exists():
+                parent_file = parent_snapshot / rel
+                if parent_file.exists():
+                    parent_size = len(parent_file.read_text(encoding="utf-8", errors="replace"))
+                    if parent_size > 100 and len(content) > parent_size * 3:
+                        warnings.append(
+                            f"{rel}: extreme bloat ({len(content)} vs parent {parent_size} chars)"
+                        )
+
+    passed = len(issues) == 0
+    return {"passed": passed, "issues": issues, "warnings": warnings}
 
 
 # ─── Preference Pairs (Scientific Taste pattern) ────────────────────────────
@@ -492,6 +710,9 @@ def main():
     s = sub.add_parser("structural", help="Run structural evaluation")
     s.add_argument("gen_id")
 
+    sm = sub.add_parser("smoke-test", help="Quick sanity check before LLM-judge")
+    sm.add_argument("gen_id")
+
     j = sub.add_parser("prepare-judge", help="Prepare LLM-judge context")
     j.add_argument("gen_id")
 
@@ -505,6 +726,17 @@ def main():
     if args.command == "structural":
         result = eval_structural(args.gen_id)
         print(json.dumps(result, indent=2))
+
+    elif args.command == "smoke-test":
+        result = eval_smoke_test(args.gen_id)
+        status = "PASS" if result["passed"] else "FAIL"
+        print(f"Smoke test: {status}")
+        for issue in result["issues"]:
+            print(f"  [FATAL] {issue}")
+        for warning in result["warnings"]:
+            print(f"  [WARN]  {warning}")
+        if result["passed"] and not result["warnings"]:
+            print("  All checks passed. Safe to proceed to LLM-Judge.")
 
     elif args.command == "prepare-judge":
         ctx = prepare_judge_context(args.gen_id)
