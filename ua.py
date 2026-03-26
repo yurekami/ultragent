@@ -56,6 +56,7 @@ RESULTS_FILE = ULTRAGENT_DIR / "results.tsv"
 PROGRAM_FILE = ULTRAGENT_DIR / "program.md"
 TRAJECTORIES_FILE = ULTRAGENT_DIR / "trajectories.jsonl"
 EVOLVE_QUEUE_FILE = ULTRAGENT_DIR / "evolve_queue.jsonl"
+LESSONS_FILE = ULTRAGENT_DIR / "lessons.jsonl"
 
 # ─── Genome Definition ───────────────────────────────────────────────────────
 
@@ -622,6 +623,113 @@ def evolve_targets_from_queue() -> list[dict]:
     return ranked
 
 
+# ─── Lessons (MetaClaw pattern: what NOT to do and why) ──────────────────────
+
+def lesson_record(
+    gen_id: str, focus_file: str, outcome: str, strategy: str, lesson: str,
+) -> dict:
+    """Record a lesson from a keep/discard decision."""
+    entry = {
+        "timestamp": now_iso(),
+        "gen_id": gen_id,
+        "focus_file": focus_file,
+        "outcome": outcome,
+        "strategy": strategy,
+        "lesson": lesson[:500],
+    }
+    with open(LESSONS_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, default=str) + "\n")
+    return entry
+
+
+def lessons_read() -> list[dict]:
+    if not LESSONS_FILE.exists():
+        return []
+    entries = []
+    for line in LESSONS_FILE.read_text(encoding="utf-8").strip().split("\n"):
+        if line.strip():
+            entries.append(json.loads(line))
+    return entries
+
+
+def lessons_for_file(focus_file: str) -> list[dict]:
+    """Get lessons relevant to a specific file — injected into MetaAgent context."""
+    return [l for l in lessons_read() if l.get("focus_file") == focus_file]
+
+
+def auto_extract_lesson(gen_id: str, entry: dict, outcome: str, reason: str = "") -> dict | None:
+    """Auto-extract a lesson from a keep/discard decision using reasoning + contract."""
+    focus_file = entry.get("focus_file", "")
+    strategy = entry.get("strategy", "")
+    gen_dir = GENERATIONS_DIR / gen_id
+
+    # Build lesson from available artifacts
+    parts = []
+
+    # From sprint contract
+    contract_file = gen_dir / "sprint_contract.md"
+    if contract_file.exists():
+        contract = contract_file.read_text(encoding="utf-8")
+        # Extract hypothesis
+        for line in contract.split("\n"):
+            if line.strip() and not line.startswith("#") and len(line.strip()) > 20:
+                parts.append(f"Approach: {line.strip()[:200]}")
+                break
+
+    # From meta reasoning
+    reasoning_file = gen_dir / "meta_reasoning.md"
+    if reasoning_file.exists():
+        reasoning = reasoning_file.read_text(encoding="utf-8")[:300]
+        parts.append(f"Changes: {reasoning.split(chr(10))[0][:200]}")
+
+    if outcome == "keep":
+        parts.append(f"Result: KEPT. This approach worked.")
+    else:
+        parts.append(f"Result: DISCARDED. Reason: {reason}")
+
+    lesson_text = " | ".join(parts) if parts else f"{outcome}: {reason}"
+
+    return lesson_record(gen_id, focus_file, outcome, strategy, lesson_text)
+
+
+def update_program_lessons() -> None:
+    """Update program.md Lessons Learned section with recent lessons."""
+    if not PROGRAM_FILE.exists():
+        return
+
+    lessons = lessons_read()
+    if not lessons:
+        return
+
+    content = PROGRAM_FILE.read_text(encoding="utf-8")
+
+    # Build lessons text
+    lesson_lines = []
+    for l in lessons[-10:]:  # Last 10 lessons
+        icon = "+" if l.get("outcome") == "keep" else "-"
+        lesson_lines.append(
+            f"- [{icon}] `{l.get('gen_id', '?')}` on `{l.get('focus_file', '?')}`: "
+            f"{l.get('lesson', '')[:150]}"
+        )
+    new_section = "\n".join(lesson_lines)
+
+    # Replace the Lessons Learned section
+    marker = "## Lessons Learned"
+    if marker in content:
+        # Find the section and replace everything until the next ## or end
+        idx = content.index(marker)
+        # Find next section
+        rest = content[idx + len(marker):]
+        next_section = rest.find("\n## ")
+        if next_section == -1:
+            # Last section — replace to end
+            content = content[:idx] + f"{marker}\n\n{new_section}\n"
+        else:
+            content = content[:idx] + f"{marker}\n\n{new_section}\n" + rest[next_section:]
+
+        PROGRAM_FILE.write_text(content, encoding="utf-8")
+
+
 # ─── Skills Registry (Hive pattern: reusable improvement patterns) ───────────
 
 SKILLS_FILE = ULTRAGENT_DIR / "skills.jsonl"
@@ -946,6 +1054,12 @@ def cmd_keep(args: argparse.Namespace) -> None:
     if skill:
         print(f"  Skill registered: {skill['pattern_name']} (delta={skill['score_delta']:+.4f})")
 
+    # Auto-extract lesson (MetaClaw pattern)
+    lesson = auto_extract_lesson(gen_id, entry, "keep")
+    if lesson:
+        update_program_lessons()
+        print(f"  Lesson recorded: {lesson['lesson'][:80]}")
+
     print(f"  [KEEP] {gen_id} score={score:.4f}")
 
 
@@ -1003,6 +1117,12 @@ def cmd_discard(args: argparse.Namespace) -> None:
             reason=f"discarded: {reason}",
             confidence="high", source="discard",
         )
+
+    # Auto-extract lesson (MetaClaw pattern)
+    lesson = auto_extract_lesson(gen_id, entry, "discard", reason)
+    if lesson:
+        update_program_lessons()
+        print(f"  Lesson recorded: {lesson['lesson'][:80]}")
 
     print(f"  [DISCARD] {gen_id} score={score:.4f} (best={best_score:.4f}) reason: {reason}")
 
@@ -1369,6 +1489,25 @@ def cmd_drain_queue(_args: argparse.Namespace) -> None:
         print(f"  {d['agent_file']}  reason: {d.get('reason', '')[:60]}")
 
 
+def cmd_lessons(args: argparse.Namespace) -> None:
+    """Show lessons learned from evolution history."""
+    lessons = lessons_read()
+    if not lessons:
+        print("No lessons yet. Lessons auto-record after each keep/discard.")
+        return
+
+    focus = args.focus_file if hasattr(args, "focus_file") and args.focus_file else None
+    if focus:
+        lessons = [l for l in lessons if l.get("focus_file") == focus]
+        print(f"=== Lessons for {focus} ({len(lessons)}) ===")
+    else:
+        print(f"=== All Lessons ({len(lessons)}) ===")
+
+    for l in lessons:
+        icon = "+" if l.get("outcome") == "keep" else "-"
+        print(f"  [{icon}] {l.get('gen_id', '?'):>10}  {l.get('focus_file', ''):.<40}  {l.get('lesson', '')[:60]}")
+
+
 def cmd_skills(_args: argparse.Namespace) -> None:
     """Show registered improvement skills (proven patterns)."""
     skills = skills_ranked()
@@ -1469,6 +1608,8 @@ def main():
     sub.add_parser("pending-evolves", help="Show pending evolves")
     sub.add_parser("drain-queue", help="Process evolve queue")
     sub.add_parser("skills", help="Show proven improvement skills")
+    ls = sub.add_parser("lessons", help="Show lessons learned")
+    ls.add_argument("focus_file", nargs="?", help="Filter by file")
     sub.add_parser("competition", help="Show competition config")
 
     args = parser.parse_args()
@@ -1486,7 +1627,7 @@ def main():
         "capture": cmd_capture, "trajectories": cmd_trajectories,
         "queue-evolve": cmd_queue_evolve, "pending-evolves": cmd_pending_evolves,
         "drain-queue": cmd_drain_queue,
-        "skills": cmd_skills, "competition": cmd_competition,
+        "skills": cmd_skills, "lessons": cmd_lessons, "competition": cmd_competition,
     }
 
     if args.command in commands:

@@ -98,6 +98,11 @@ Modify ONLY this file (focused mutation mode).
 ## Recent Experiments (results.tsv)
 {output of ua.py results 10}
 
+## Lessons for {focus_file} (MetaClaw: what NOT to do)
+{lessons from lessons.jsonl filtered for this focus file}
+These are REAL outcomes from prior attempts. DO NOT repeat failed approaches.
+If empty: "No prior lessons for this file."
+
 ## Current Genome: {focus_file}
 {full contents of the focus file from parent snapshot}
 
