@@ -203,21 +203,29 @@ cp $WORK_DIR/meta_reasoning.md ~/.claude/ultragent/generations/$NEXT_GEN/ 2>/dev
 PYTHONIOENCODING=utf-8 python ~/.claude/ultragent/evaluate.py structural $NEXT_GEN
 ```
 
-**LLM-Judge eval (spawn SKEPTICAL Sonnet evaluator):**
+**Pairwise LLM-Judge eval (Scientific Taste approach):**
 ```bash
 PYTHONIOENCODING=utf-8 python ~/.claude/ultragent/evaluate.py prepare-judge $NEXT_GEN
 ```
 Spawn a `code-reviewer` agent (model: sonnet) with the judge context.
-The evaluator prompt in evaluate.py includes:
-- Skeptical calibration ("assume mediocre until proven otherwise")
-- Few-shot examples (weak=0.52, moderate=0.72, strong=0.88)
-- Sprint contract validation (score changes AGAINST the proposal)
 
-Also include the sprint_contract.md if it exists:
-"Here is the MetaAgent's sprint contract (proposal). Score execution AGAINST this contract.
-Overpromising and underdelivering scores WORSE than a modest proposal fully executed."
+The evaluator uses PAIRWISE COMPARISON (not rubric scoring):
+- Compares parent version vs child version of the changed file
+- Reasons step by step about each change
+- Classifies changes as behavioral vs cosmetic
+- Checks position-swap consistency
+- Includes dynamic few-shot from real preference history
+- Returns: preferred (parent/child), confidence, score_delta, key_reason
 
-Parse its JSON response for scores.
+Tell the evaluator to READ BOTH files:
+- Parent file: `~/.claude/ultragent/generations/<parent_id>/snapshot/<focus_file>`
+- Child file: `~/.claude/ultragent/generations/$NEXT_GEN/snapshot/<focus_file>`
+
+Parse JSON response. Compute aggregate with:
+```python
+from evaluate import compute_pairwise_aggregate
+aggregate = compute_pairwise_aggregate(structural_score, judge_result, parent_aggregate)
+```
 
 Write scores to `generations/$NEXT_GEN/scores.json` then:
 ```bash

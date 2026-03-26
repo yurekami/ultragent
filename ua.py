@@ -797,6 +797,17 @@ def cmd_keep(args: argparse.Namespace) -> None:
         "description": entry.get("description", ""),
     })
 
+    # Record preference pair (Scientific Taste pattern)
+    parent_id = entry.get("parent_gen_id", "")
+    if parent_id:
+        from evaluate import preference_record
+        preference_record(
+            winner_id=gen_id, loser_id=parent_id,
+            focus_file=entry.get("focus_file", ""),
+            reason=entry.get("description", "kept: score improved"),
+            confidence="high", source="keep",
+        )
+
     print(f"  [KEEP] {gen_id} score={score:.4f}")
 
 
@@ -843,6 +854,17 @@ def cmd_discard(args: argparse.Namespace) -> None:
         "duration_s": str(entry.get("duration_s", "")),
         "description": f"DISCARD: {reason}",
     })
+
+    # Record preference pair (parent wins)
+    parent_id = entry.get("parent_gen_id", "")
+    if parent_id:
+        from evaluate import preference_record
+        preference_record(
+            winner_id=parent_id, loser_id=gen_id,
+            focus_file=entry.get("focus_file", ""),
+            reason=f"discarded: {reason}",
+            confidence="high", source="discard",
+        )
 
     print(f"  [DISCARD] {gen_id} score={score:.4f} (best={best_score:.4f}) reason: {reason}")
 

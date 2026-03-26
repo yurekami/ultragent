@@ -157,184 +157,209 @@ def eval_structural(gen_id: str) -> dict:
     return results
 
 
-# ─── LLM-Judge Context Preparation ──────────────────────────────────────────
+# ─── Preference Pairs (Scientific Taste pattern) ────────────────────────────
+
+PREFERENCES_FILE = ULTRAGENT_DIR / "preference_pairs.jsonl"
+
+
+def preference_record(
+    winner_id: str, loser_id: str, focus_file: str,
+    reason: str, confidence: str, source: str = "keep_discard",
+) -> dict:
+    """Record a preference pair from a keep/discard decision or evaluation."""
+    entry = {
+        "timestamp": __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc
+        ).isoformat(),
+        "winner": winner_id,
+        "loser": loser_id,
+        "focus_file": focus_file,
+        "reason": reason[:500],
+        "confidence": confidence,
+        "source": source,
+    }
+    with open(PREFERENCES_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, default=str) + "\n")
+    return entry
+
+
+def preferences_read(last_n: int | None = None) -> list[dict]:
+    """Read preference pairs."""
+    if not PREFERENCES_FILE.exists():
+        return []
+    entries = []
+    for line in PREFERENCES_FILE.read_text(encoding="utf-8").strip().split("\n"):
+        if line.strip():
+            entries.append(json.loads(line))
+    return entries[-last_n:] if last_n else entries
+
+
+def preferences_for_file(focus_file: str) -> list[dict]:
+    """Get preference pairs involving a specific file."""
+    return [p for p in preferences_read() if p.get("focus_file") == focus_file]
+
+
+# ─── Pairwise LLM-Judge (Scientific Taste approach) ─────────────────────────
 
 def prepare_judge_context(gen_id: str) -> str:
     """
-    Prepare the context for LLM-judge evaluation.
-    Returns a formatted string to be sent to an evaluator agent.
+    Prepare pairwise comparison context for the LLM-Judge.
+    Instead of rubric scoring, the judge compares parent vs child directly.
+    Inspired by 'AI Can Learn Scientific Taste' (RLCF).
     """
     gen_dir = GENERATIONS_DIR / gen_id
-
     parts = []
-    parts.append(f"# Generation {gen_id} — Evaluation Context\n")
+
+    parts.append(f"# Pairwise Evaluation: {gen_id}\n")
+
+    # Get parent ID
+    parent_id = None
+    meta_file = gen_dir / "metadata.json"
+    if meta_file.exists():
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        parent_id = meta.get("parent_gen_id")
+
+    if not parent_id:
+        parts.append("No parent — this is the initial generation. Score absolutely.\n")
+        return "\n".join(parts)
+
+    # Sprint contract (if exists)
+    contract_file = gen_dir / "sprint_contract.md"
+    if contract_file.exists():
+        contract = contract_file.read_text(encoding="utf-8")
+        parts.append("## Sprint Contract (MetaAgent's proposal)\n" + contract + "\n")
 
     # Patch
     patch_file = gen_dir / "patch.diff"
     if patch_file.exists():
         patch = patch_file.read_text(encoding="utf-8")
-        parts.append("## Changes (Patch)\n```diff\n" + patch + "\n```\n")
-    else:
-        parts.append("## Changes\nNo patch file found (this may be the initial generation).\n")
+        parts.append("## Diff (changes from parent to child)\n```diff\n" + patch[:5000] + "\n```\n")
 
     # MetaAgent reasoning
     reasoning_file = gen_dir / "meta_reasoning.md"
     if reasoning_file.exists():
         reasoning = reasoning_file.read_text(encoding="utf-8")
-        parts.append("## MetaAgent Reasoning\n" + reasoning + "\n")
+        parts.append("## MetaAgent's Self-Assessment\n" + reasoning[:2000] + "\n")
 
-    # Structural scores
-    scores_file = gen_dir / "scores.json"
-    if scores_file.exists():
-        scores = json.loads(scores_file.read_text(encoding="utf-8"))
-        parts.append("## Current Scores\n```json\n" + json.dumps(scores, indent=2) + "\n```\n")
+    # Structural scores comparison
+    parent_struct = gen_dir_score(parent_id)
+    child_struct = gen_dir_score(gen_id)
+    parts.append(f"## Structural Scores\n- Parent ({parent_id}): {parent_struct}\n- Child ({gen_id}): {child_struct}\n")
 
-    # Parent info
-    meta_file = gen_dir / "metadata.json"
-    if meta_file.exists():
-        meta = json.loads(meta_file.read_text(encoding="utf-8"))
-        parent_id = meta.get("parent_gen_id")
-        if parent_id:
-            parent_scores_file = GENERATIONS_DIR / parent_id / "scores.json"
-            if parent_scores_file.exists():
-                parent_scores = json.loads(parent_scores_file.read_text(encoding="utf-8"))
-                parts.append("## Parent Scores (" + parent_id + ")\n```json\n" + json.dumps(parent_scores, indent=2) + "\n```\n")
-
-    # Snapshot summary (file list with sizes)
-    snapshot_dir = gen_dir / "snapshot"
-    if snapshot_dir.exists():
-        parts.append("## Genome Files\n")
-        for root, _dirs, files in os.walk(snapshot_dir):
-            for fname in sorted(files):
-                fpath = Path(root) / fname
-                rel = fpath.relative_to(snapshot_dir).as_posix()
-                size = fpath.stat().st_size
-                parts.append(f"- `{rel}` ({size} bytes)")
+    # Dynamic few-shot from preference history
+    prefs = preferences_read(last_n=5)
+    if prefs:
+        parts.append("## Prior Preference Decisions (from evolution history)\n")
+        parts.append("These are REAL keep/discard decisions from prior generations:\n")
+        for p in prefs:
+            parts.append(f"- **{p['winner']} > {p['loser']}** on `{p.get('focus_file','')}`: {p.get('reason','')[:120]}")
         parts.append("")
 
-    # Evaluation rubric with skeptical calibration and few-shot examples
-    parts.append("""## Evaluation Rubric
+    # The pairwise evaluation protocol
+    parts.append("""## Pairwise Evaluation Protocol
 
-You are a SKEPTICAL evaluator. Your job is to find what's WRONG, not praise what's right.
-Assume every change is mediocre until proven otherwise. Surface-level improvements
-(adding headings, reformatting, boilerplate additions) deserve LOW improvement scores.
-Only genuine behavioral improvements (concrete examples that change how an agent acts,
-specific guidance that prevents real failure modes, simplification that removes bloat
-while preserving value) deserve HIGH scores.
+You are comparing **Version A (parent)** vs **Version B (child)** of an agent prompt file.
+Your job is to determine: is the child BETTER than the parent?
 
-If you catch yourself wanting to give 8+ on improvement, stop and ask: "Would this
-change actually make a human developer's experience with this agent measurably better?"
-If you can't point to a specific scenario where the change helps, score lower.
+Read BOTH versions of the changed file. Then reason step by step:
 
-Score each dimension 0-10:
+### Step 1: What changed?
+List every concrete difference. Ignore whitespace/formatting.
 
-### Clarity (0-10, weight 0.20)
-Would an agent know EXACTLY what to do in ambiguous situations? Vague advice like
-"follow best practices" scores 3-4. Concrete decision trees score 7-8. Tested
-behavioral specifications with edge cases score 9-10.
+### Step 2: For each change, ask:
+- Does this change how the agent would BEHAVE in a real scenario?
+- Can you name a SPECIFIC situation where this change helps?
+- Does this change CONTRADICT anything else in the config?
+- Is this change LOAD-BEARING or just cosmetic?
 
-### Specificity (0-10, weight 0.15)
-Count the concrete examples. Zero examples = max 4. One example = max 6.
-Multiple examples across different scenarios = 7-8. Examples that demonstrate
-the BOUNDARY between correct and incorrect behavior = 9-10.
+### Step 3: Weigh the evidence
+- Changes that alter behavior in real scenarios = strong signal
+- Cosmetic changes (headings, formatting) = weak signal
+- Simplification (fewer lines, same information) = positive signal
+- Bloat (more lines, redundant information) = negative signal
+- New failure modes addressed = strong positive
+- Contradictions introduced = strong negative
 
-### Actionability (0-10, weight 0.15)
-Can an agent act on these instructions WITHOUT asking clarifying questions?
-If any instruction requires interpretation or judgment calls not covered by
-the prompt, deduct points. "Handle errors appropriately" = 3. "Catch specific
-error types X, Y, Z and respond with..." = 8.
+### Step 4: Form preference
+Would you rather have an agent following Version A or Version B?
 
-### Consistency (0-10, weight 0.20)
-Does this file contradict any other file in the genome? Does it reference
-tools, patterns, or conventions that conflict with CLAUDE.md or rules/*.md?
-Even subtle contradictions (e.g., agent says "use arrow functions" while
-coding-style.md says "prefer function keyword") = deduct 2-3 points.
+### Position-Swap Check
+After forming your preference, mentally swap the labels.
+If you called them "B vs A" instead of "A vs B", would your preference change?
+If yes, you have position bias — correct for it.
 
-### Coverage (0-10, weight 0.15)
-What failure modes are NOT addressed? What scenarios would cause the agent
-to do the wrong thing? Every unaddressed gap = deduct 1 point. Having a
-Failure_Modes_To_Avoid section doesn't count unless the failure modes are
-SPECIFIC to this agent's domain, not generic.
+## Output Format
 
-### Conciseness (0-10, weight 0.05)
-Is every sentence load-bearing? Could you delete any paragraph without
-losing information? Boilerplate that restates what the agent would do
-anyway = deduct points. A file that grew 2x but only added 1.2x information
-scores poorly here.
-
-### Improvement Over Parent (0-10, weight 0.10)
-THE HARDEST CRITERION. Score 5 = "changes are roughly neutral."
-Below 5 = regression. Above 5 = genuine improvement.
-Adding a heading with no other changes = 5.
-Adding generic boilerplate = 4.
-Adding concrete, actionable examples that change agent behavior = 7-8.
-Removing bloat while preserving or improving quality = 8-9.
-Fundamental restructuring that makes the agent measurably better = 9-10.
-
-## Calibration Examples
-
-### Example A: WEAK improvement (score 0.52)
-A generation that added a top-level heading and reformatted XML tags to markdown,
-but made no substantive content changes:
+Return ONLY this JSON:
 ```json
 {
-  "clarity": 6, "specificity": 4, "actionability": 5, "consistency": 6,
-  "coverage": 5, "conciseness": 7, "improvement": 4,
-  "aggregate": 0.5200,
-  "reasoning": "Changes are cosmetic only. The heading fixes a structural issue but the agent's actual behavior would be identical. No new examples, no new failure modes, no improved specificity. The improvement score reflects that formatting changes don't change outcomes."
+  "preferred": "child" or "parent",
+  "confidence": "high" or "medium" or "low",
+  "score_delta": N.NN,
+  "key_reason": "One sentence: WHY the preferred version is better",
+  "behavioral_changes": ["change 1 that affects behavior", "change 2"],
+  "cosmetic_changes": ["change that doesn't affect behavior"],
+  "regressions": ["anything that got worse"],
+  "position_swap_consistent": true or false,
+  "suggestions": ["what would make the child even better"]
 }
 ```
 
-### Example B: MODERATE improvement (score 0.72)
-A generation that added 3 concrete before/after code examples and a Philosophy
-section aligning with the user's coding principles, but also increased file
-length by 90% and introduced some redundancy with existing principles:
-```json
-{
-  "clarity": 8, "specificity": 8, "actionability": 8, "consistency": 8,
-  "coverage": 7, "conciseness": 5, "improvement": 7,
-  "aggregate": 0.7350,
-  "reasoning": "The examples are genuinely useful and would change agent behavior. The Philosophy section creates alignment with project values. However, the file nearly doubled in length while some additions restate what the Core_Principles already covered. Conciseness suffers. A tighter version with the same examples in half the lines would score higher."
-}
-```
+### score_delta Guide
+- `-0.5 to -0.1`: child is WORSE (regression)
+- `-0.1 to 0.0`: child is slightly worse or neutral
+- `0.0`: no meaningful difference
+- `0.0 to 0.1`: marginal improvement (cosmetic only)
+- `0.1 to 0.3`: moderate improvement (some behavioral changes)
+- `0.3 to 0.5`: strong improvement (clear behavioral uplift)
+- `0.5+`: exceptional (fundamental quality leap)
 
-### Example C: STRONG improvement (score 0.88)
-A generation that replaced vague instructions with a concrete decision tree,
-added a failure mode that prevents a real class of errors, removed 30 lines of
-boilerplate while preserving all information, and simplified the output format:
-```json
-{
-  "clarity": 9, "specificity": 9, "actionability": 9, "consistency": 9,
-  "coverage": 8, "conciseness": 9, "improvement": 9,
-  "aggregate": 0.8850,
-  "reasoning": "Every change is load-bearing. The decision tree replaces ambiguity with specificity. The new failure mode addresses a real pattern seen in prior runs. The boilerplate removal makes the prompt tighter without losing information. This is a net simplification that also improves quality -- the ideal outcome."
-}
-```
-
-### Aggregate Score
-Weighted average mapped to 0-1 scale:
-sum(dimension_score * weight) / 10
-
-Weights: Clarity=0.20, Specificity=0.15, Actionability=0.15, Consistency=0.20, Coverage=0.15, Conciseness=0.05, Improvement=0.10
-
-Output as JSON:
-```json
-{
-  "clarity": N,
-  "specificity": N,
-  "actionability": N,
-  "consistency": N,
-  "coverage": N,
-  "conciseness": N,
-  "improvement": N,
-  "aggregate": N.NNNN,
-  "reasoning": "Brief explanation of scores",
-  "suggestions": ["Suggestion 1", "Suggestion 2"]
-}
-```
+Be skeptical. Most changes are in the 0.0 to 0.2 range.
+A score_delta > 0.3 requires extraordinary evidence.
 """)
 
     return "\n".join(parts)
+
+
+def gen_dir_score(gen_id: str) -> str:
+    """Get a compact score string for a generation."""
+    scores_file = GENERATIONS_DIR / gen_id / "scores.json"
+    if scores_file.exists():
+        s = json.loads(scores_file.read_text(encoding="utf-8"))
+        return f"structural={s.get('structural', '?')}, llm_judge={s.get('llm_judge', '?')}, aggregate={s.get('aggregate', '?')}"
+    return "no scores"
+
+
+def compute_pairwise_aggregate(
+    structural_score: float, judge_result: dict, parent_aggregate: float,
+) -> float:
+    """
+    Compute aggregate score from structural + pairwise judge result.
+    The pairwise judge returns a score_delta, not an absolute score.
+    New aggregate = parent_aggregate + (delta adjusted by confidence).
+    """
+    delta = judge_result.get("score_delta", 0)
+    confidence = judge_result.get("confidence", "medium")
+    preferred = judge_result.get("preferred", "parent")
+
+    # Confidence multiplier
+    conf_mult = {"high": 1.0, "medium": 0.7, "low": 0.4}.get(confidence, 0.5)
+
+    # If parent is preferred, delta should be negative
+    if preferred == "parent" and delta > 0:
+        delta = -abs(delta)
+    elif preferred == "child" and delta < 0:
+        delta = abs(delta)
+
+    # Apply confidence-adjusted delta
+    adjusted_delta = delta * conf_mult
+
+    # Structural contribution (small weight, absolute)
+    # Blend: 80% preference-based, 20% structural
+    pref_score = parent_aggregate + adjusted_delta
+    final = 0.8 * pref_score + 0.2 * structural_score
+
+    return round(max(0, min(1, final)), 4)
 
 
 # ─── Benchmark System ────────────────────────────────────────────────────────
